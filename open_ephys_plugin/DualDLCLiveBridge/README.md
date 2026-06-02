@@ -35,31 +35,6 @@ C:\Users\Владимир\Desktop\plugin-GUI-main\plugin-GUI-main
 ROI уже находится в `.txt` конфигах камер. В Python поэтому стоит
 `CROPPING = None`, дополнительный software crop не нужен.
 
-## Чем это отличается от старого USB-пути
-
-Раньше логика могла быть такой: Open Ephys или отдельная программа напрямую
-работала с USB-устройством, либо скрипт сам писал в физический USB/serial
-выход. В новой схеме USB используется только для камер Daheng. Open Ephys не
-читает видеопоток и не трогает Galaxy SDK.
-
-Новая схема:
-
-1. Камеры подключены через USB3 hub.
-2. `dual_rt_dlc_live.py` открывает камеры по серийникам, применяет Galaxy
-   configs, получает кадры, запускает DLCLive и считает состояние лапы.
-3. Python формирует `ttl_lines[0..7]` и отправляет UDP пакет на
-   `127.0.0.1:47000`.
-4. Плагин Open Ephys принимает пакет, создает TTL events в event channel
-   `Dual DLCLive TTL`.
-5. Дальше эти TTL events нужно подать на ваш downstream output/stimulation
-   processor в Open Ephys.
-
-Важно: сам `Dual DLCLive Bridge` не щелкает физическим USB-стимулятором. Он
-создает цифровые события внутри Open Ephys. Физический выход должен делать
-следующий processor/plugin в цепочке, например ваш стимуляционный output node,
-Arduino/PulsePal/TTL output plugin или другой модуль, который умеет реагировать
-на TTL events.
-
 ## Какие TTL-линии формируются
 
 Python формирует массив `ttl_lines` длиной 8:
@@ -132,7 +107,7 @@ DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG = None
 | `DUAL_OE_BRIDGE_SEND_EVERY_N_RESULTS` | отправлять каждый N-й результат DLCLive |
 | `DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG` | порог угла для линий `2` и `3` |
 
-Для минимальной задержки оставляй:
+Для минимальной задержки:
 
 ```python
 DUAL_PROCESS_EVERY_N_PAIRS = 1
@@ -172,7 +147,7 @@ pkts 128 | pair 128 | ttl 0x03 | q 0 | age 42ms
 
 ### 1. Подготовить камеры
 
-1. Подключи обе Daheng камеры через USB3 hub.
+1. Подключи обе Daheng камеры через USB3.
 2. Закрой GalaxyView, если он открыт. GalaxyView может держать камеры и мешать
    Python открыть их.
 3. Проверь, что серийники соответствуют текущему конфигу:
