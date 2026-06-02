@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime logs and generated data
+*.log
+*_debug.log
+*_benchmark.csv
+*.mp4
+*.avi
+*.mov
+
+# Open Ephys / Visual Studio build outputs
+*.pdb
+*.ilk
+*.exp
+*.lib
+out/
+build/
+.vs/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# Keep the release DLL in dist, ignore other DLLs by default
+*.dll
+!dist/windows-x64-debug/DualDLCLiveBridge.dll
+
