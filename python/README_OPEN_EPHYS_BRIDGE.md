@@ -1,5 +1,29 @@
 # Dual DLCLive -> Open Ephys Bridge
 
+## Current protocol
+
+Default mode in `config_dual_rt_dlc_live.py`:
+
+```python
+DUAL_OE_BRIDGE_PACKET_MODE = "pose"
+```
+
+Python sends `dual_dlc_live.pose.v1` packets with raw pose points and metadata.
+The Open Ephys plugin computes filtering, valid triplets, hind angles and TTL
+lines itself. Python no longer has to send `ttl_lines` in the default mode.
+
+Synthetic test without cameras:
+
+```powershell
+C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --mode pose --count 5 --interval 0.025 --wait-ack
+```
+
+Legacy compatibility test:
+
+```powershell
+C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --mode ttl --count 5 --interval 0.025 --wait-ack
+```
+
 Этот файл - короткая рабочая инструкция со стороны DLC-проекта. Полная
 документация плагина лежит здесь:
 

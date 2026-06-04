@@ -84,13 +84,19 @@ ENABLE_BENCHMARK_CSV = False
 # Open Ephys bridge
 # ============================================================================
 # UDP packets are consumed by the DualDLCLiveBridge Open Ephys plugin.
-# TTL lines:
+# Packet modes:
+#   "pose" - send raw DLCLive pose points; plugin computes validity, angle and TTL.
+#   "ttl"  - legacy mode; Python computes ttl_lines itself.
+#
+# Plugin TTL lines:
 #   0 - left pose triplet is valid
 #   1 - right pose triplet is valid
-#   2 - left hind angle <= DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG
-#   3 - right hind angle <= DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG
+#   2 - left hind angle trigger, if enabled in plugin
+#   3 - right hind angle trigger, if enabled in plugin
 DUAL_OE_BRIDGE_ENABLED = True
 DUAL_OE_BRIDGE_HOST = "127.0.0.1"
 DUAL_OE_BRIDGE_PORT = 47000
 DUAL_OE_BRIDGE_SEND_EVERY_N_RESULTS = 1
+DUAL_OE_BRIDGE_PACKET_MODE = "pose"
+DUAL_OE_BRIDGE_REQUEST_ACK = False
 DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG = None

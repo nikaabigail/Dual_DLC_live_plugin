@@ -3,17 +3,24 @@
 
     Dual DLCLive bridge for Open Ephys GUI.
 
-    Receives compact UDP JSON packets from dual_rt_dlc_live.py and mirrors
-    the packet's ttl_lines array into an Open Ephys TTL event channel.
+    Receives dual DLCLive UDP JSON packets. Legacy packets can still provide
+    ttl_lines, while pose.v1 packets provide raw pose points and let this
+    processor compute validity, angle triggers and TTL states.
 
     ------------------------------------------------------------------
 */
 
 #include "DualDLCLiveBridge.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace
 {
 constexpr size_t maxPendingTtlWords = 512;
+constexpr int packetModeNone = 0;
+constexpr int packetModeLegacyTtl = 1;
+constexpr int packetModePose = 2;
 }
 
 DualDLCLiveBridge::DualDLCLiveBridge()
@@ -23,6 +30,8 @@ DualDLCLiveBridge::DualDLCLiveBridge()
     emittedLineStates.fill (false);
     for (auto& line : desiredLineStates)
         line.store (false);
+    for (auto& line : lastTriggerTimeMs)
+        line.store (0);
 }
 
 DualDLCLiveBridge::~DualDLCLiveBridge()
@@ -47,6 +56,121 @@ void DualDLCLiveBridge::registerParameters()
                      1024,
                      65535,
                      true);
+
+    addBooleanParameter (Parameter::PROCESSOR_SCOPE,
+                         "angle_trigger_enabled",
+                         "Angle trigger",
+                         "Enable angle threshold output on TTL lines 2 and 3",
+                         false,
+                         false);
+
+    addFloatParameter (Parameter::PROCESSOR_SCOPE,
+                       "angle_threshold_deg",
+                       "Angle threshold",
+                       "Hind angle threshold for TTL trigger lines",
+                       "deg",
+                       55.0f,
+                       0.0f,
+                       180.0f,
+                       0.1f,
+                       false);
+
+    addFloatParameter (Parameter::PROCESSOR_SCOPE,
+                       "conf_thresh_use",
+                       "Use conf",
+                       "Likelihood threshold used by the online pose filter",
+                       "",
+                       0.20f,
+                       0.0f,
+                       1.0f,
+                       0.01f,
+                       false);
+
+    addFloatParameter (Parameter::PROCESSOR_SCOPE,
+                       "conf_thresh_draw",
+                       "Draw conf",
+                       "Likelihood threshold used to accept a visible triplet",
+                       "",
+                       0.15f,
+                       0.0f,
+                       1.0f,
+                       0.01f,
+                       false);
+
+    addBooleanParameter (Parameter::PROCESSOR_SCOPE,
+                         "use_filter",
+                         "Filter",
+                         "Apply the same online filtering used by dual_rt_dlc_live.py",
+                         true,
+                         false);
+
+    addBooleanParameter (Parameter::PROCESSOR_SCOPE,
+                         "enable_pcutoff",
+                         "P cutoff",
+                         "Drop points below the use confidence threshold before filtering",
+                         true,
+                         false);
+
+    addBooleanParameter (Parameter::PROCESSOR_SCOPE,
+                         "enable_despike",
+                         "Despike",
+                         "Reject sudden implausible point jumps",
+                         true,
+                         false);
+
+    addFloatParameter (Parameter::PROCESSOR_SCOPE,
+                       "despike_threshold_px",
+                       "Despike px",
+                       "Maximum accepted point jump unless reacquiring after a gap",
+                       "px",
+                       150.0f,
+                       1.0f,
+                       2000.0f,
+                       1.0f,
+                       false);
+
+    addIntParameter (Parameter::PROCESSOR_SCOPE,
+                     "despike_reset_gap_frames",
+                     "Reset gap",
+                     "Frame gap after which the despike filter allows reacquisition",
+                     15,
+                     0,
+                     10000,
+                     false);
+
+    addIntParameter (Parameter::PROCESSOR_SCOPE,
+                     "median_window",
+                     "Median",
+                     "Median filter window size in frames",
+                     3,
+                     1,
+                     31,
+                     false);
+
+    addBooleanParameter (Parameter::PROCESSOR_SCOPE,
+                         "enable_hold",
+                         "Hold",
+                         "Hold the last good point for a limited number of frames",
+                         false,
+                         false);
+
+    addIntParameter (Parameter::PROCESSOR_SCOPE,
+                     "max_hold_frames",
+                     "Hold frames",
+                     "Maximum number of frames to hold the last good point",
+                     20,
+                     0,
+                     10000,
+                     false);
+
+    addIntParameter (Parameter::PROCESSOR_SCOPE,
+                     "refractory_ms",
+                     "Refractory",
+                     "Minimum time between angle trigger rising edges",
+                     0,
+                     0,
+                     60000,
+                     false);
 }
 
 AudioProcessorEditor* DualDLCLiveBridge::createEditor()
@@ -66,10 +190,23 @@ void DualDLCLiveBridge::updateSettings()
 
 void DualDLCLiveBridge::parameterValueChanged (Parameter* param)
 {
-    if (param->getName().equalsIgnoreCase ("enabled")
-        || param->getName().equalsIgnoreCase ("udp_port"))
+    const String name = param->getName();
+    if (name.equalsIgnoreCase ("enabled")
+        || name.equalsIgnoreCase ("udp_port"))
     {
         ensureSocket();
+    }
+
+    if (name.equalsIgnoreCase ("use_filter")
+        || name.equalsIgnoreCase ("enable_pcutoff")
+        || name.equalsIgnoreCase ("enable_despike")
+        || name.equalsIgnoreCase ("despike_threshold_px")
+        || name.equalsIgnoreCase ("despike_reset_gap_frames")
+        || name.equalsIgnoreCase ("median_window")
+        || name.equalsIgnoreCase ("enable_hold")
+        || name.equalsIgnoreCase ("max_hold_frames"))
+    {
+        resetPoseFilters();
     }
 }
 
@@ -110,6 +247,21 @@ int64 DualDLCLiveBridge::getLastPacketAgeMs() const
 uint8 DualDLCLiveBridge::getLastTtlWord() const
 {
     return lastTtlWord.load();
+}
+
+double DualDLCLiveBridge::getLastLeftAngleDeg() const
+{
+    return lastLeftAngleDeg.load();
+}
+
+double DualDLCLiveBridge::getLastRightAngleDeg() const
+{
+    return lastRightAngleDeg.load();
+}
+
+int DualDLCLiveBridge::getLastPacketMode() const
+{
+    return lastPacketMode.load();
 }
 
 int DualDLCLiveBridge::getPendingTtlWordCount() const
@@ -181,13 +333,17 @@ void DualDLCLiveBridge::closeSocket()
     queueTtlWord (0);
     for (auto& line : desiredLineStates)
         line.store (false);
+    resetPoseFilters();
+    lastPacketMode.store (packetModeNone);
+    lastLeftAngleDeg.store (-1.0);
+    lastRightAngleDeg.store (-1.0);
     currentPort.store (-1);
 }
 
 void DualDLCLiveBridge::run()
 {
     constexpr int maxPacketsPerWake = 64;
-    constexpr int maxPacketBytes = 8192;
+    constexpr int maxPacketBytes = 32768;
     char buffer[maxPacketBytes] {};
 
     while (! threadShouldExit())
@@ -239,30 +395,23 @@ bool DualDLCLiveBridge::applyMessage (const String& message, String& ackMessage)
         return false;
 
     const String schema = parsed.getProperty ("schema", var()).toString();
-    if (schema.isNotEmpty() && schema != "dual_dlc_live.v1")
-        return false;
-
-    const var ttlLines = parsed.getProperty ("ttl_lines", var());
-    if (! ttlLines.isArray())
-        return false;
-
-    Array<var>* lines = ttlLines.getArray();
-    const int nLines = jmin (8, lines->size());
-    std::array<bool, 8> nextStates {};
-    for (int line = 0; line < 8; line++)
-        nextStates[(size_t) line] = desiredLineStates[(size_t) line].load();
-
-    for (int line = 0; line < nLines; line++)
-    {
-        nextStates[(size_t) line] = bool (lines->getReference (line));
-    }
-
     uint8 ttlWord = 0;
-    for (int line = 0; line < 8; line++)
+
+    if (schema.isEmpty() || schema == "dual_dlc_live.v1")
     {
-        desiredLineStates[(size_t) line].store (nextStates[(size_t) line]);
-        if (nextStates[(size_t) line])
-            ttlWord |= static_cast<uint8> (1 << line);
+        if (! applyTtlMessage (parsed, ttlWord))
+            return false;
+        lastPacketMode.store (packetModeLegacyTtl);
+    }
+    else if (schema == "dual_dlc_live.pose.v1")
+    {
+        if (! applyPoseMessage (parsed, ttlWord))
+            return false;
+        lastPacketMode.store (packetModePose);
+    }
+    else
+    {
+        return false;
     }
 
     queueTtlWord (ttlWord);
@@ -279,9 +428,399 @@ bool DualDLCLiveBridge::applyMessage (const String& message, String& ackMessage)
         if (ttlHex.length() < 2)
             ttlHex = "0" + ttlHex;
 
-        ackMessage = "dual_dlc_live.ack pair=" + String (pairIndex) + " ttl=0x" + ttlHex + "\n";
+        const String modeText = lastPacketMode.load() == packetModePose ? "pose" : "ttl";
+        String angleText;
+        if (lastPacketMode.load() == packetModePose)
+        {
+            const double leftAngle = lastLeftAngleDeg.load();
+            const double rightAngle = lastRightAngleDeg.load();
+            angleText = " left_angle=" + (leftAngle >= 0.0 ? String (leftAngle, 2) : String ("nan"))
+                        + " right_angle=" + (rightAngle >= 0.0 ? String (rightAngle, 2) : String ("nan"));
+        }
+
+        ackMessage = "dual_dlc_live.ack pair=" + String (pairIndex)
+                     + " mode=" + modeText
+                     + " ttl=0x" + ttlHex
+                     + angleText
+                     + "\n";
     }
     return true;
+}
+
+bool DualDLCLiveBridge::applyTtlMessage (const var& parsed, uint8& ttlWord)
+{
+    const var ttlLines = parsed.getProperty ("ttl_lines", var());
+    if (! ttlLines.isArray())
+        return false;
+
+    Array<var>* lines = ttlLines.getArray();
+    const int nLines = jmin (8, lines->size());
+    std::array<bool, 8> nextStates {};
+    for (int line = 0; line < 8; line++)
+        nextStates[(size_t) line] = desiredLineStates[(size_t) line].load();
+
+    for (int line = 0; line < nLines; line++)
+        nextStates[(size_t) line] = bool (lines->getReference (line));
+
+    ttlWord = 0;
+    for (int line = 0; line < 8; line++)
+    {
+        desiredLineStates[(size_t) line].store (nextStates[(size_t) line]);
+        if (nextStates[(size_t) line])
+            ttlWord |= static_cast<uint8> (1 << line);
+    }
+
+    double angle = 0.0;
+    const var left = parsed.getProperty ("left", var());
+    const var right = parsed.getProperty ("right", var());
+    lastLeftAngleDeg.store (left.isObject() && readFiniteDouble (left.getProperty ("angle_deg", var()), angle) ? angle : -1.0);
+    lastRightAngleDeg.store (right.isObject() && readFiniteDouble (right.getProperty ("angle_deg", var()), angle) ? angle : -1.0);
+    return true;
+}
+
+bool DualDLCLiveBridge::applyPoseMessage (const var& parsed, uint8& ttlWord)
+{
+    const ScopedLock lock (poseStateLock);
+
+    const TripletConfig triplets = readTripletConfig (parsed);
+    SidePoseResult left = evaluateSidePose (parsed.getProperty ("left", var()),
+                                            "left",
+                                            triplets,
+                                            leftFilterStates);
+    SidePoseResult right = evaluateSidePose (parsed.getProperty ("right", var()),
+                                             "right",
+                                             triplets,
+                                             rightFilterStates);
+
+    const bool angleEnabled = getBoolParam ("angle_trigger_enabled", false);
+    const double angleThreshold = (double) getFloatParam ("angle_threshold_deg", 55.0f);
+
+    std::array<bool, 8> nextStates {};
+    nextStates[0] = left.hasTriplet;
+    nextStates[1] = right.hasTriplet;
+    nextStates[2] = shouldEmitAngleTrigger (2, angleEnabled && left.hasAngle && left.angleDeg <= angleThreshold);
+    nextStates[3] = shouldEmitAngleTrigger (3, angleEnabled && right.hasAngle && right.angleDeg <= angleThreshold);
+
+    ttlWord = 0;
+    for (int line = 0; line < 8; line++)
+    {
+        desiredLineStates[(size_t) line].store (nextStates[(size_t) line]);
+        if (nextStates[(size_t) line])
+            ttlWord |= static_cast<uint8> (1 << line);
+    }
+
+    lastLeftAngleDeg.store (left.hasAngle ? left.angleDeg : -1.0);
+    lastRightAngleDeg.store (right.hasAngle ? right.angleDeg : -1.0);
+    return true;
+}
+
+DualDLCLiveBridge::SidePoseResult DualDLCLiveBridge::evaluateSidePose (const var& sideObject,
+                                                                        const String& cameraName,
+                                                                        const TripletConfig& triplets,
+                                                                        FilterStateMap& filterStates)
+{
+    SidePoseResult result;
+    result.pickedSide = cameraName;
+
+    if (! sideObject.isObject())
+        return result;
+
+    const var rawPoints = sideObject.getProperty ("raw_points", var());
+    if (! rawPoints.isObject())
+        return result;
+
+    const int64 frameId = (int64) sideObject.getProperty ("frame_id", var (0));
+    std::vector<String> pointNames;
+
+    auto addTripletNames = [&pointNames] (const std::array<String, 3>& triplet)
+    {
+        for (const String& name : triplet)
+        {
+            bool exists = false;
+            for (const String& existing : pointNames)
+            {
+                if (existing == name)
+                {
+                    exists = true;
+                    break;
+                }
+            }
+            if (! exists)
+                pointNames.push_back (name);
+        }
+    };
+
+    addTripletNames (triplets.left);
+    addTripletNames (triplets.right);
+
+    PosePointMap filteredPoints;
+    for (const String& name : pointNames)
+        filteredPoints[pointKey (name)] = filterPoint (name, readPosePoint (rawPoints, name), frameId, filterStates);
+
+    const auto leftScore = scoreTriplet (filteredPoints, triplets.left);
+    const auto rightScore = scoreTriplet (filteredPoints, triplets.right);
+    const bool useRight = rightScore.first > leftScore.first
+                          || (rightScore.first == leftScore.first && rightScore.second > leftScore.second);
+    const std::array<String, 3>& selected = useRight ? triplets.right : triplets.left;
+    result.pickedSide = useRight ? "right" : "left";
+
+    const PosePoint hip = pointFromMap (filteredPoints, selected[0]);
+    const PosePoint ankle = pointFromMap (filteredPoints, selected[1]);
+    const PosePoint toes = pointFromMap (filteredPoints, selected[2]);
+    const double confDraw = (double) getFloatParam ("conf_thresh_draw", 0.15f);
+
+    result.hasTriplet = hip.valid
+                        && ankle.valid
+                        && toes.valid
+                        && hip.likelihood >= confDraw
+                        && ankle.likelihood >= confDraw
+                        && toes.likelihood >= confDraw;
+
+    if (result.hasTriplet)
+        result.hasAngle = safeAngleDeg (hip, ankle, toes, result.angleDeg);
+
+    return result;
+}
+
+DualDLCLiveBridge::TripletConfig DualDLCLiveBridge::readTripletConfig (const var& parsed) const
+{
+    TripletConfig triplets;
+    const var sideSets = parsed.getProperty ("side_point_sets", var());
+    if (! sideSets.isObject())
+        return triplets;
+
+    auto readTriplet = [&sideSets] (const String& sideName, std::array<String, 3>& destination)
+    {
+        const var names = sideSets.getProperty (Identifier (sideName), var());
+        if (! names.isArray())
+            return;
+
+        Array<var>* array = names.getArray();
+        if (array->size() != 3)
+            return;
+
+        for (int i = 0; i < 3; i++)
+            destination[(size_t) i] = array->getReference (i).toString();
+    };
+
+    readTriplet ("left", triplets.left);
+    readTriplet ("right", triplets.right);
+    return triplets;
+}
+
+DualDLCLiveBridge::PosePoint DualDLCLiveBridge::readPosePoint (const var& rawPoints, const String& name) const
+{
+    PosePoint point;
+    if (! rawPoints.isObject())
+        return point;
+
+    const var rawPoint = rawPoints.getProperty (Identifier (name), var());
+    if (! rawPoint.isObject())
+        return point;
+
+    double x = 0.0;
+    double y = 0.0;
+    double likelihood = 0.0;
+    if (! readFiniteDouble (rawPoint.getProperty ("x", var()), x)
+        || ! readFiniteDouble (rawPoint.getProperty ("y", var()), y)
+        || ! readFiniteDouble (rawPoint.getProperty ("likelihood", var()), likelihood))
+    {
+        return point;
+    }
+
+    point.valid = true;
+    point.x = x;
+    point.y = y;
+    point.likelihood = likelihood;
+    return point;
+}
+
+DualDLCLiveBridge::PosePoint DualDLCLiveBridge::filterPoint (const String& name,
+                                                             const PosePoint& rawPoint,
+                                                             int64 frameId,
+                                                             FilterStateMap& filterStates) const
+{
+    if (! getBoolParam ("use_filter", true))
+        return rawPoint;
+
+    PointFilterState& state = filterStates[pointKey (name)];
+    bool isGood = rawPoint.valid
+                  && ((! getBoolParam ("enable_pcutoff", true))
+                      || rawPoint.likelihood >= (double) getFloatParam ("conf_thresh_use", 0.20f));
+
+    if (isGood && getBoolParam ("enable_despike", true) && state.hasLastGood)
+    {
+        const double jump = std::hypot (rawPoint.x - state.lastGoodX, rawPoint.y - state.lastGoodY);
+        const int64 gap = frameId - state.lastGoodFrameId;
+        const bool allowReacquire = gap > (int64) getIntParam ("despike_reset_gap_frames", 15);
+        if (jump > (double) getFloatParam ("despike_threshold_px", 150.0f) && ! allowReacquire)
+            isGood = false;
+    }
+
+    if (isGood)
+    {
+        const int medianWindow = jmax (1, getIntParam ("median_window", 3));
+        state.hasLastGood = true;
+        state.lastGoodX = rawPoint.x;
+        state.lastGoodY = rawPoint.y;
+        state.lastGoodFrameId = frameId;
+        state.xHist.push_back (rawPoint.x);
+        state.yHist.push_back (rawPoint.y);
+        while ((int) state.xHist.size() > medianWindow)
+            state.xHist.pop_front();
+        while ((int) state.yHist.size() > medianWindow)
+            state.yHist.pop_front();
+
+        PosePoint filtered = rawPoint;
+        filtered.x = medianValue (state.xHist);
+        filtered.y = medianValue (state.yHist);
+        return filtered;
+    }
+
+    if (getBoolParam ("enable_hold", false) && state.hasLastGood)
+    {
+        const int64 gap = frameId - state.lastGoodFrameId;
+        if (gap <= (int64) getIntParam ("max_hold_frames", 20))
+        {
+            PosePoint held;
+            held.valid = true;
+            held.x = state.lastGoodX;
+            held.y = state.lastGoodY;
+            held.likelihood = jmin (1.0, (double) jmax (getFloatParam ("conf_thresh_draw", 0.15f),
+                                                       getFloatParam ("conf_thresh_use", 0.20f))
+                                         + 0.01);
+            return held;
+        }
+    }
+
+    return PosePoint {};
+}
+
+std::pair<int, double> DualDLCLiveBridge::scoreTriplet (const PosePointMap& points,
+                                                        const std::array<String, 3>& triplet) const
+{
+    const double confDraw = (double) getFloatParam ("conf_thresh_draw", 0.15f);
+    int count = 0;
+    double likelihoodSum = 0.0;
+    for (const String& name : triplet)
+    {
+        const PosePoint point = pointFromMap (points, name);
+        if (point.valid && point.likelihood >= confDraw)
+        {
+            count++;
+            likelihoodSum += point.likelihood;
+        }
+    }
+    return { count, likelihoodSum };
+}
+
+DualDLCLiveBridge::PosePoint DualDLCLiveBridge::pointFromMap (const PosePointMap& points, const String& name) const
+{
+    const auto it = points.find (pointKey (name));
+    return it == points.end() ? PosePoint {} : it->second;
+}
+
+bool DualDLCLiveBridge::safeAngleDeg (const PosePoint& a,
+                                      const PosePoint& b,
+                                      const PosePoint& c,
+                                      double& angleDeg) const
+{
+    const double bax = a.x - b.x;
+    const double bay = a.y - b.y;
+    const double bcx = c.x - b.x;
+    const double bcy = c.y - b.y;
+    const double n1 = std::hypot (bax, bay);
+    const double n2 = std::hypot (bcx, bcy);
+    if (n1 < 1.0e-6 || n2 < 1.0e-6)
+        return false;
+
+    const double cosValue = jlimit (-1.0, 1.0, (bax * bcx + bay * bcy) / (n1 * n2));
+    angleDeg = std::acos (cosValue) * 180.0 / double_Pi;
+    return std::isfinite (angleDeg);
+}
+
+void DualDLCLiveBridge::resetPoseFilters()
+{
+    const ScopedLock lock (poseStateLock);
+    leftFilterStates.clear();
+    rightFilterStates.clear();
+    for (auto& line : lastTriggerTimeMs)
+        line.store (0);
+}
+
+bool DualDLCLiveBridge::shouldEmitAngleTrigger (int line, bool requested)
+{
+    if (! requested)
+        return false;
+
+    const int refractoryMs = getIntParam ("refractory_ms", 0);
+    if (refractoryMs <= 0)
+    {
+        lastTriggerTimeMs[(size_t) line].store (Time::currentTimeMillis());
+        return true;
+    }
+
+    if (desiredLineStates[(size_t) line].load())
+        return true;
+
+    const int64 now = Time::currentTimeMillis();
+    const int64 last = lastTriggerTimeMs[(size_t) line].load();
+    if (last > 0 && now - last < refractoryMs)
+        return false;
+
+    lastTriggerTimeMs[(size_t) line].store (now);
+    return true;
+}
+
+bool DualDLCLiveBridge::getBoolParam (const String& name, bool fallback) const
+{
+    if (auto* param = getParameter (name))
+        return bool (param->getValue());
+    return fallback;
+}
+
+int DualDLCLiveBridge::getIntParam (const String& name, int fallback) const
+{
+    if (auto* param = getParameter (name))
+        return int (param->getValue());
+    return fallback;
+}
+
+float DualDLCLiveBridge::getFloatParam (const String& name, float fallback) const
+{
+    if (auto* param = getParameter (name))
+        return float (param->getValue());
+    return fallback;
+}
+
+bool DualDLCLiveBridge::readFiniteDouble (const var& value, double& out)
+{
+    if (value.isVoid() || value.isUndefined())
+        return false;
+    if (! (value.isDouble() || value.isInt() || value.isInt64()))
+        return false;
+
+    out = (double) value;
+    return std::isfinite (out);
+}
+
+std::string DualDLCLiveBridge::pointKey (const String& name)
+{
+    return std::string (name.toRawUTF8());
+}
+
+double DualDLCLiveBridge::medianValue (const std::deque<double>& values)
+{
+    if (values.empty())
+        return 0.0;
+
+    std::vector<double> sorted (values.begin(), values.end());
+    std::sort (sorted.begin(), sorted.end());
+    const size_t n = sorted.size();
+    if ((n % 2) != 0)
+        return sorted[n / 2];
+
+    return 0.5 * (sorted[n / 2 - 1] + sorted[n / 2]);
 }
 
 void DualDLCLiveBridge::queueTtlWord (uint8 ttlWord)

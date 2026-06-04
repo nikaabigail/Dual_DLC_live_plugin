@@ -1,5 +1,35 @@
 # Dual DLC Live Plugin
 
+## Current protocol
+
+Default runtime mode is now `DUAL_OE_BRIDGE_PACKET_MODE = "pose"`.
+
+In this mode Python keeps only camera acquisition, frame pairing and
+DLCLive/PyTorch inference for the Open Ephys path. It sends raw pose points and
+metadata as UDP JSON with schema `dual_dlc_live.pose.v1`.
+
+`Dual DLCLive Bridge` computes inside the Open Ephys plugin:
+
+- point filtering: p-cutoff, despike, median window and optional hold;
+- left/right triplet selection;
+- valid triplet lines;
+- hind angle;
+- optional angle-trigger TTL lines;
+- refractory gating for angle trigger rising edges.
+
+TTL map:
+
+```text
+line 0 = left valid triplet
+line 1 = right valid triplet
+line 2 = left angle trigger, if angle_trigger_enabled is on in plugin UI
+line 3 = right angle trigger, if angle_trigger_enabled is on in plugin UI
+line 4..7 = reserved
+```
+
+Legacy `dual_dlc_live.v1` packets with `ttl_lines` are still accepted for
+compatibility and can be sent by `send_dual_dlc_bridge_test.py --mode ttl`.
+
 Интеграция dual DLCLive с Open Ephys:
 
 ```text
@@ -139,5 +169,4 @@ PLUGIN_EXPORTS_OK
 - Open Ephys слушает UDP `127.0.0.1:47000`.
 - `send_dual_dlc_bridge_test.py --wait-ack` получает ACK от C++ plugin.
 - `OpenEphysBridge.send()` из `dual_rt_dlc_live.py` формирует production packet
-  с корректными `ttl_lines`.
-
+  `dual_dlc_live.pose.v1` с raw pose points и metadata.

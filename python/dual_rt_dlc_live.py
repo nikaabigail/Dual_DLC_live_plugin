@@ -67,7 +67,7 @@ class InferenceState:
 
 
 class OpenEphysBridge:
-    """Sends compact dual-DLCLive state packets to an Open Ephys bridge plugin."""
+    """Sends dual-DLCLive packets to an Open Ephys bridge plugin."""
 
     def __init__(self, logger: logging.Logger) -> None:
         self.logger = logger
@@ -75,6 +75,8 @@ class OpenEphysBridge:
         self.host = str(getattr(config, "DUAL_OE_BRIDGE_HOST", "127.0.0.1"))
         self.port = int(getattr(config, "DUAL_OE_BRIDGE_PORT", 47000))
         self.send_every = max(1, int(getattr(config, "DUAL_OE_BRIDGE_SEND_EVERY_N_RESULTS", 1)))
+        self.packet_mode = str(getattr(config, "DUAL_OE_BRIDGE_PACKET_MODE", "pose")).strip().lower()
+        self.request_ack = bool(getattr(config, "DUAL_OE_BRIDGE_REQUEST_ACK", False))
         threshold = getattr(config, "DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG", None)
         self.angle_threshold_deg = None if threshold is None else float(threshold)
         self.sock: Optional[socket.socket] = None
@@ -84,7 +86,12 @@ class OpenEphysBridge:
             return
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setblocking(False)
-        self.logger.info("Open Ephys bridge enabled: UDP %s:%d", self.host, self.port)
+        self.logger.info(
+            "Open Ephys bridge enabled: UDP %s:%d mode=%s",
+            self.host,
+            self.port,
+            self.packet_mode,
+        )
 
     def close(self) -> None:
         if self.sock is not None:
@@ -108,17 +115,15 @@ class OpenEphysBridge:
         packet: live.FramePacket,
         result: dict[str, object],
     ) -> dict[str, object]:
-        angle = result["hind_angle"]
         return {
             "name": runtime.name,
             "frame_id": int(packet.frame_id),
             "source_frame_id": packet.source_frame_id,
             "capture_ts": float(packet.capture_ts),
-            "valid": bool(result["has_triplet"]),
-            "angle_deg": None if angle is None else float(angle),
             "infer_ms": float(result["infer_ms"]),
-            "picked_side": str(result["picked_side"]),
             "drops": int(runtime.source.dropped_total),
+            "raw_visible": int(result["raw_visible"]),
+            "raw_points": result["raw_points"],
         }
 
     def _angle_trigger(self, result: dict[str, object]) -> bool:
@@ -136,13 +141,40 @@ class OpenEphysBridge:
         left_state = self._side_payload(left, result.left_packet, result.left_result)
         right_state = self._side_payload(right, result.right_packet, result.right_result)
 
+        if self.packet_mode == "ttl":
+            return self._build_ttl_payload(result, left_state, right_state)
+
+        payload: dict[str, object] = {
+            "schema": "dual_dlc_live.pose.v1",
+            "pair_index": int(result.pair_index),
+            "host_time": time.time(),
+            "host_dt_ms": float(result.host_dt_ms),
+            "camera_dt_ms": result.camera_dt_ms,
+            "tracked_points": list(config.DUAL_USE_POINTS),
+            "side_point_sets": {
+                str(side): list(points)
+                for side, points in getattr(config, "DUAL_SIDE_POINT_SETS", {}).items()
+            },
+            "left": left_state,
+            "right": right_state,
+        }
+        if self.request_ack:
+            payload["ack"] = True
+        return payload
+
+    def _build_ttl_payload(
+        self,
+        result: PairInferenceResult,
+        left_state: dict[str, object],
+        right_state: dict[str, object],
+    ) -> dict[str, object]:
         ttl_lines = [False] * 8
         ttl_lines[0] = bool(result.left_result["has_triplet"])
         ttl_lines[1] = bool(result.right_result["has_triplet"])
         ttl_lines[2] = self._angle_trigger(result.left_result)
         ttl_lines[3] = self._angle_trigger(result.right_result)
 
-        return {
+        payload: dict[str, object] = {
             "schema": "dual_dlc_live.v1",
             "pair_index": int(result.pair_index),
             "host_time": time.time(),
@@ -152,6 +184,9 @@ class OpenEphysBridge:
             "right": right_state,
             "ttl_lines": ttl_lines,
         }
+        if self.request_ack:
+            payload["ack"] = True
+        return payload
 
 
 def setup_dual_logger() -> logging.Logger:
@@ -264,6 +299,9 @@ def validate_dual_config() -> None:
         raise ValueError("DUAL_OE_BRIDGE_PORT must be positive.")
     if int(getattr(config, "DUAL_OE_BRIDGE_SEND_EVERY_N_RESULTS", 1)) <= 0:
         raise ValueError("DUAL_OE_BRIDGE_SEND_EVERY_N_RESULTS must be positive.")
+    bridge_mode = str(getattr(config, "DUAL_OE_BRIDGE_PACKET_MODE", "pose")).strip().lower()
+    if bridge_mode not in {"pose", "ttl"}:
+        raise ValueError('DUAL_OE_BRIDGE_PACKET_MODE must be "pose" or "ttl".')
 
 
 def build_camera_runtime(camera_cfg: dict[str, object]) -> CameraRuntime:
@@ -507,6 +545,7 @@ def run_inference(
 
     return initialized, {
         "infer_ms": infer_ms,
+        "raw_points": raw_points,
         "raw_visible": live.count_visible_points(raw_points),
         "filtered_visible": live.count_visible_points(filtered_points),
         "draw_points": draw_points,

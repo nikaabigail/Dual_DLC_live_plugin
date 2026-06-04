@@ -1,5 +1,33 @@
 # Dual DLCLive Bridge для Open Ephys
 
+## Current protocol
+
+Default Python bridge mode sends `dual_dlc_live.pose.v1` UDP packets. These
+packets contain raw pose points and timing metadata, not ready-made TTL
+decisions.
+
+This plugin computes:
+
+- online point filter: p-cutoff, despike, median and optional hold;
+- left/right triplet validity;
+- hind angle at ankle;
+- TTL state word;
+- optional line 2/3 angle triggers when `angle_trigger_enabled` is enabled.
+
+TTL map:
+
+```text
+line 0 = left valid triplet
+line 1 = right valid triplet
+line 2 = left angle trigger
+line 3 = right angle trigger
+line 4..7 = reserved
+```
+
+The old `dual_dlc_live.v1`/`ttl_lines` packet is still supported as legacy
+input. Use `send_dual_dlc_bridge_test.py --mode pose` for the current synthetic
+test and `--mode ttl` for legacy compatibility.
+
 Этот документ описывает, как запускать связку:
 
 ```text
@@ -9,7 +37,7 @@
 Плагин называется `Dual DLCLive Bridge`. Он не запускает DLCLive и не читает
 камеры. Камерами и нейросетью управляет отдельный Python-процесс
 `dual_rt_dlc_live.py`, а Open Ephys получает от него только маленькие UDP JSON
-пакеты с готовым состоянием TTL-линий.
+пакеты с raw pose points и metadata. TTL-состояние считается внутри plugin.
 
 ## Где лежат файлы
 
