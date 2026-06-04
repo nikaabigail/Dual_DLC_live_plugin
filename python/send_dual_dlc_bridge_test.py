@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import socket
+import struct
 import time
 from typing import Any
 
@@ -19,6 +20,12 @@ SIDE_POINT_SETS = {
     "right": ("hl_hip_r", "hl_ankle_r", "hl_toes_r"),
 }
 TRACKED_POINTS = sorted({name for triplet in SIDE_POINT_SETS.values() for name in triplet})
+BINARY_POSE_MAGIC = b"DDLP"
+BINARY_POSE_VERSION = 1
+BINARY_FLAG_ACK = 1 << 0
+BINARY_HEADER_STRUCT = struct.Struct("<4sHHqdffHH")
+BINARY_SIDE_STRUCT = struct.Struct("<qqdfIHH")
+BINARY_POINT_STRUCT = struct.Struct("<fff")
 
 
 def point(x: float, y: float, likelihood: float) -> dict[str, float]:
@@ -145,6 +152,50 @@ def build_ttl_packet(index: int, request_ack: bool = False) -> dict[str, Any]:
     return packet
 
 
+def build_binary_pose_packet(packet: dict[str, Any], request_ack: bool = False) -> bytes:
+    flags = BINARY_FLAG_ACK if request_ack else 0
+    camera_dt_ms = packet.get("camera_dt_ms")
+    data = bytearray()
+    data.extend(
+        BINARY_HEADER_STRUCT.pack(
+            BINARY_POSE_MAGIC,
+            BINARY_POSE_VERSION,
+            flags,
+            int(packet["pair_index"]),
+            float(packet["host_time"]),
+            float(packet["host_dt_ms"]),
+            float("nan") if camera_dt_ms is None else float(camera_dt_ms),
+            len(TRACKED_POINTS),
+            0,
+        )
+    )
+
+    for side_name in ("left", "right"):
+        side = packet[side_name]
+        data.extend(
+            BINARY_SIDE_STRUCT.pack(
+                int(side["frame_id"]),
+                -1 if side.get("source_frame_id") is None else int(side["source_frame_id"]),
+                float(side["capture_ts"]),
+                float(side["infer_ms"]),
+                int(side["drops"]),
+                int(side["raw_visible"]),
+                0,
+            )
+        )
+        raw_points = side["raw_points"]
+        for point_name in TRACKED_POINTS:
+            point_data = raw_points[point_name]
+            data.extend(
+                BINARY_POINT_STRUCT.pack(
+                    float(point_data["x"]),
+                    float(point_data["y"]),
+                    float(point_data["likelihood"]),
+                )
+            )
+    return bytes(data)
+
+
 def expected_pose_ttl(index: int) -> str:
     # Plugin defaults keep angle triggers disabled, so synthetic pose mode only
     # guarantees validity bits unless the GUI toggle is enabled manually.
@@ -169,6 +220,7 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=40)
     parser.add_argument("--interval", type=float, default=0.1)
     parser.add_argument("--mode", choices=("pose", "ttl"), default="pose")
+    parser.add_argument("--wire-format", choices=("binary", "json"), default="binary")
     parser.add_argument("--wait-ack", action="store_true")
     parser.add_argument("--ack-timeout", type=float, default=1.0)
     parser.add_argument("--check-ack-ttl", action="store_true")
@@ -184,13 +236,18 @@ def main() -> None:
             if args.mode == "pose":
                 packet = build_pose_packet(index, request_ack=args.wait_ack)
                 expected_ttl = expected_pose_ttl(index)
+                data = (
+                    build_binary_pose_packet(packet, request_ack=args.wait_ack)
+                    if args.wire_format == "binary"
+                    else (json.dumps(packet, separators=(",", ":")) + "\n").encode("utf-8")
+                )
             else:
                 packet = build_ttl_packet(index, request_ack=args.wait_ack)
                 expected_ttl = expected_ttl_lines(packet)
-
-            data = (json.dumps(packet, separators=(",", ":")) + "\n").encode("utf-8")
+                data = (json.dumps(packet, separators=(",", ":")) + "\n").encode("utf-8")
             sock.sendto(data, (args.host, args.port))
-            print(f"sent pair={index} mode={args.mode} expected_ttl={expected_ttl}")
+            wire = args.wire_format if args.mode == "pose" else "json"
+            print(f"sent pair={index} mode={args.mode} wire={wire} expected_ttl={expected_ttl}")
             if args.wait_ack:
                 try:
                     ack_data, ack_addr = sock.recvfrom(2048)

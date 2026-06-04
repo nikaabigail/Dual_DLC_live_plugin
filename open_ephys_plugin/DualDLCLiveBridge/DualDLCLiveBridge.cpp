@@ -13,7 +13,9 @@
 #include "DualDLCLiveBridge.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cmath>
+#include <cstring>
 
 namespace
 {
@@ -21,6 +23,20 @@ constexpr size_t maxPendingTtlWords = 512;
 constexpr int packetModeNone = 0;
 constexpr int packetModeLegacyTtl = 1;
 constexpr int packetModePose = 2;
+constexpr int packetModeBinaryPose = 3;
+constexpr std::uint16_t binaryPoseVersion = 1;
+constexpr std::uint16_t binaryFlagAck = 1 << 0;
+
+template <typename Value>
+bool readBinaryValue (const char* data, int numBytes, size_t& offset, Value& out)
+{
+    if (offset + sizeof (Value) > (size_t) numBytes)
+        return false;
+
+    std::memcpy (&out, data + offset, sizeof (Value));
+    offset += sizeof (Value);
+    return true;
+}
 }
 
 DualDLCLiveBridge::DualDLCLiveBridge()
@@ -350,9 +366,9 @@ void DualDLCLiveBridge::run()
     {
         for (int packet = 0; packet < maxPacketsPerWake && ! threadShouldExit(); packet++)
         {
-            String message;
             String senderAddress;
             int senderPort = 0;
+            int bytesRead = 0;
 
             {
                 const ScopedLock lock (socketLock);
@@ -363,18 +379,15 @@ void DualDLCLiveBridge::run()
                 if (socket->waitUntilReady (true, timeoutMs) <= 0)
                     break;
 
-                const int bytesRead = socket->read (buffer, maxPacketBytes - 1, false, senderAddress, senderPort);
+                bytesRead = socket->read (buffer, maxPacketBytes, false, senderAddress, senderPort);
                 if (bytesRead <= 0)
                     break;
-
-                buffer[bytesRead] = 0;
-                message = String::fromUTF8 (buffer, bytesRead).trim();
             }
 
-            if (message.isNotEmpty())
+            if (bytesRead > 0)
             {
                 String ackMessage;
-                if (applyMessage (message, ackMessage) && ackMessage.isNotEmpty() && senderPort > 0)
+                if (applyDatagram (buffer, bytesRead, ackMessage) && ackMessage.isNotEmpty() && senderPort > 0)
                 {
                     const ScopedLock lock (socketLock);
                     if (socket != nullptr)
@@ -447,6 +460,47 @@ bool DualDLCLiveBridge::applyMessage (const String& message, String& ackMessage)
     return true;
 }
 
+bool DualDLCLiveBridge::applyDatagram (const char* data, int numBytes, String& ackMessage)
+{
+    if (data == nullptr || numBytes <= 0)
+        return false;
+
+    if (numBytes >= 4 && std::memcmp (data, "DDLP", 4) == 0)
+    {
+        uint8 ttlWord = 0;
+        int64 pairIndex = -1;
+        bool requestAck = false;
+        if (! applyBinaryPosePacket (data, numBytes, ttlWord, pairIndex, requestAck))
+            return false;
+
+        lastPacketMode.store (packetModeBinaryPose);
+        queueTtlWord (ttlWord);
+        packetsReceived.fetch_add (1);
+        lastPairIndex.store (pairIndex);
+        lastPacketTimeMs.store (Time::currentTimeMillis());
+
+        if (requestAck)
+        {
+            String ttlHex = String::toHexString ((int) ttlWord).toUpperCase();
+            if (ttlHex.length() < 2)
+                ttlHex = "0" + ttlHex;
+
+            const double leftAngle = lastLeftAngleDeg.load();
+            const double rightAngle = lastRightAngleDeg.load();
+            ackMessage = "dual_dlc_live.ack pair=" + String (pairIndex)
+                         + " mode=binary"
+                         + " ttl=0x" + ttlHex
+                         + " left_angle=" + (leftAngle >= 0.0 ? String (leftAngle, 2) : String ("nan"))
+                         + " right_angle=" + (rightAngle >= 0.0 ? String (rightAngle, 2) : String ("nan"))
+                         + "\n";
+        }
+        return true;
+    }
+
+    const String message = String::fromUTF8 (data, numBytes).trim();
+    return message.isNotEmpty() && applyMessage (message, ackMessage);
+}
+
 bool DualDLCLiveBridge::applyTtlMessage (const var& parsed, uint8& ttlWord)
 {
     const var ttlLines = parsed.getProperty ("ttl_lines", var());
@@ -514,6 +568,145 @@ bool DualDLCLiveBridge::applyPoseMessage (const var& parsed, uint8& ttlWord)
     return true;
 }
 
+bool DualDLCLiveBridge::applyBinaryPosePacket (const char* data,
+                                               int numBytes,
+                                               uint8& ttlWord,
+                                               int64& pairIndex,
+                                               bool& requestAck)
+{
+    size_t offset = 4;
+    std::uint16_t version = 0;
+    std::uint16_t flags = 0;
+    std::int64_t packetPairIndex = -1;
+    double hostTime = 0.0;
+    float hostDtMs = 0.0f;
+    float cameraDtMs = 0.0f;
+    std::uint16_t pointCount = 0;
+    std::uint16_t reserved = 0;
+
+    if (! readBinaryValue (data, numBytes, offset, version)
+        || ! readBinaryValue (data, numBytes, offset, flags)
+        || ! readBinaryValue (data, numBytes, offset, packetPairIndex)
+        || ! readBinaryValue (data, numBytes, offset, hostTime)
+        || ! readBinaryValue (data, numBytes, offset, hostDtMs)
+        || ! readBinaryValue (data, numBytes, offset, cameraDtMs)
+        || ! readBinaryValue (data, numBytes, offset, pointCount)
+        || ! readBinaryValue (data, numBytes, offset, reserved))
+    {
+        return false;
+    }
+
+    ignoreUnused (hostTime, hostDtMs, cameraDtMs, reserved);
+    if (version != binaryPoseVersion)
+        return false;
+
+    const std::array<String, 6> pointNames {{
+        "hl_ankle_l",
+        "hl_ankle_r",
+        "hl_hip_l",
+        "hl_hip_r",
+        "hl_toes_l",
+        "hl_toes_r",
+    }};
+    if (pointCount != pointNames.size())
+        return false;
+
+    struct BinarySide
+    {
+        int64 frameId = 0;
+        PosePointMap rawPoints;
+    };
+
+    auto readSide = [&] (BinarySide& side) -> bool
+    {
+        std::int64_t frameId = 0;
+        std::int64_t sourceFrameId = 0;
+        double captureTs = 0.0;
+        float inferMs = 0.0f;
+        std::uint32_t drops = 0;
+        std::uint16_t rawVisible = 0;
+        std::uint16_t sideReserved = 0;
+
+        if (! readBinaryValue (data, numBytes, offset, frameId)
+            || ! readBinaryValue (data, numBytes, offset, sourceFrameId)
+            || ! readBinaryValue (data, numBytes, offset, captureTs)
+            || ! readBinaryValue (data, numBytes, offset, inferMs)
+            || ! readBinaryValue (data, numBytes, offset, drops)
+            || ! readBinaryValue (data, numBytes, offset, rawVisible)
+            || ! readBinaryValue (data, numBytes, offset, sideReserved))
+        {
+            return false;
+        }
+
+        ignoreUnused (sourceFrameId, captureTs, inferMs, drops, rawVisible, sideReserved);
+        side.frameId = (int64) frameId;
+        for (size_t index = 0; index < pointNames.size(); index++)
+        {
+            float x = 0.0f;
+            float y = 0.0f;
+            float likelihood = 0.0f;
+            if (! readBinaryValue (data, numBytes, offset, x)
+                || ! readBinaryValue (data, numBytes, offset, y)
+                || ! readBinaryValue (data, numBytes, offset, likelihood))
+            {
+                return false;
+            }
+
+            PosePoint point;
+            if (std::isfinite (x) && std::isfinite (y) && std::isfinite (likelihood))
+            {
+                point.valid = true;
+                point.x = (double) x;
+                point.y = (double) y;
+                point.likelihood = (double) likelihood;
+            }
+            side.rawPoints[pointKey (pointNames[index])] = point;
+        }
+        return true;
+    };
+
+    BinarySide leftSide;
+    BinarySide rightSide;
+    if (! readSide (leftSide) || ! readSide (rightSide))
+        return false;
+
+    const ScopedLock lock (poseStateLock);
+    const TripletConfig triplets;
+    SidePoseResult left = evaluateSidePosePoints (leftSide.rawPoints,
+                                                  leftSide.frameId,
+                                                  "left",
+                                                  triplets,
+                                                  leftFilterStates);
+    SidePoseResult right = evaluateSidePosePoints (rightSide.rawPoints,
+                                                   rightSide.frameId,
+                                                   "right",
+                                                   triplets,
+                                                   rightFilterStates);
+
+    const bool angleEnabled = getBoolParam ("angle_trigger_enabled", false);
+    const double angleThreshold = (double) getFloatParam ("angle_threshold_deg", 55.0f);
+
+    std::array<bool, 8> nextStates {};
+    nextStates[0] = left.hasTriplet;
+    nextStates[1] = right.hasTriplet;
+    nextStates[2] = shouldEmitAngleTrigger (2, angleEnabled && left.hasAngle && left.angleDeg <= angleThreshold);
+    nextStates[3] = shouldEmitAngleTrigger (3, angleEnabled && right.hasAngle && right.angleDeg <= angleThreshold);
+
+    ttlWord = 0;
+    for (int line = 0; line < 8; line++)
+    {
+        desiredLineStates[(size_t) line].store (nextStates[(size_t) line]);
+        if (nextStates[(size_t) line])
+            ttlWord |= static_cast<uint8> (1 << line);
+    }
+
+    lastLeftAngleDeg.store (left.hasAngle ? left.angleDeg : -1.0);
+    lastRightAngleDeg.store (right.hasAngle ? right.angleDeg : -1.0);
+    pairIndex = (int64) packetPairIndex;
+    requestAck = (flags & binaryFlagAck) != 0;
+    return true;
+}
+
 DualDLCLiveBridge::SidePoseResult DualDLCLiveBridge::evaluateSidePose (const var& sideObject,
                                                                         const String& cameraName,
                                                                         const TripletConfig& triplets,
@@ -553,9 +746,47 @@ DualDLCLiveBridge::SidePoseResult DualDLCLiveBridge::evaluateSidePose (const var
     addTripletNames (triplets.left);
     addTripletNames (triplets.right);
 
+    PosePointMap rawPointMap;
+    for (const String& name : pointNames)
+        rawPointMap[pointKey (name)] = readPosePoint (rawPoints, name);
+
+    return evaluateSidePosePoints (rawPointMap, frameId, cameraName, triplets, filterStates);
+}
+
+DualDLCLiveBridge::SidePoseResult DualDLCLiveBridge::evaluateSidePosePoints (const PosePointMap& rawPoints,
+                                                                              int64 frameId,
+                                                                              const String& cameraName,
+                                                                              const TripletConfig& triplets,
+                                                                              FilterStateMap& filterStates)
+{
+    SidePoseResult result;
+    result.pickedSide = cameraName;
+
+    std::vector<String> pointNames;
+    auto addTripletNames = [&pointNames] (const std::array<String, 3>& triplet)
+    {
+        for (const String& name : triplet)
+        {
+            bool exists = false;
+            for (const String& existing : pointNames)
+            {
+                if (existing == name)
+                {
+                    exists = true;
+                    break;
+                }
+            }
+            if (! exists)
+                pointNames.push_back (name);
+        }
+    };
+
+    addTripletNames (triplets.left);
+    addTripletNames (triplets.right);
+
     PosePointMap filteredPoints;
     for (const String& name : pointNames)
-        filteredPoints[pointKey (name)] = filterPoint (name, readPosePoint (rawPoints, name), frameId, filterStates);
+        filteredPoints[pointKey (name)] = filterPoint (name, pointFromMap (rawPoints, name), frameId, filterStates);
 
     const auto leftScore = scoreTriplet (filteredPoints, triplets.left);
     const auto rightScore = scoreTriplet (filteredPoints, triplets.right);

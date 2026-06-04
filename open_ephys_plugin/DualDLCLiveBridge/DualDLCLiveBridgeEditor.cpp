@@ -63,7 +63,7 @@ void DualDLCLiveBridgeEditor::refreshStatus()
     String pairText = pairIndex >= 0 ? String (pairIndex) : "-";
     String ageText = ageMs >= 0 ? String (ageMs) + "ms" : "-";
     String ttlText = String::toHexString ((int) ttlWord).toUpperCase().paddedLeft ('0', 2);
-    String modeText = packetMode == 2 ? "pose" : (packetMode == 1 ? "ttl" : "-");
+    String modeText = packetMode == 3 ? "bin" : (packetMode == 2 ? "pose" : (packetMode == 1 ? "ttl" : "-"));
     String leftText = leftAngle >= 0.0 ? String (leftAngle, 1) : "-";
     String rightText = rightAngle >= 0.0 ? String (rightAngle, 1) : "-";
 

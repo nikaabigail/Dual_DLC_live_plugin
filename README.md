@@ -2,11 +2,26 @@
 
 ## Current protocol
 
-Default runtime mode is now `DUAL_OE_BRIDGE_PACKET_MODE = "pose"`.
+Default runtime mode is now `DUAL_OE_BRIDGE_PACKET_MODE = "pose"` with
+`DUAL_OE_BRIDGE_WIRE_FORMAT = "binary"`.
 
 In this mode Python keeps only camera acquisition, frame pairing and
 DLCLive/PyTorch inference for the Open Ephys path. It sends raw pose points and
-metadata as UDP JSON with schema `dual_dlc_live.pose.v1`.
+metadata as compact UDP binary packets (`DDLP`/v1). Set
+`DUAL_OE_BRIDGE_WIRE_FORMAT = "json"` to return to JSON packets with schema
+`dual_dlc_live.pose.v1`.
+
+Optimized defaults:
+
+```python
+DUAL_FAST_POSE_ONLY = True
+DUAL_ENABLE_BATCH_INFERENCE = True
+DUAL_BATCH_FALLBACK_TO_SEQUENTIAL = True
+```
+
+With `DUAL_FAST_POSE_ONLY = True`, Python does not compute filters, triplets or
+angles for the Open Ephys path. The plugin is the source of truth for angles
+and TTL.
 
 `Dual DLCLive Bridge` computes inside the Open Ephys plugin:
 
@@ -29,6 +44,8 @@ line 4..7 = reserved
 
 Legacy `dual_dlc_live.v1` packets with `ttl_lines` are still accepted for
 compatibility and can be sent by `send_dual_dlc_bridge_test.py --mode ttl`.
+JSON pose compatibility can be tested with
+`send_dual_dlc_bridge_test.py --mode pose --wire-format json --wait-ack`.
 
 Интеграция dual DLCLive с Open Ephys:
 
@@ -168,5 +185,5 @@ PLUGIN_EXPORTS_OK
 - `DualDLCLiveBridge.dll` экспортирует `getLibInfo` и `getPluginInfo`.
 - Open Ephys слушает UDP `127.0.0.1:47000`.
 - `send_dual_dlc_bridge_test.py --wait-ack` получает ACK от C++ plugin.
-- `OpenEphysBridge.send()` из `dual_rt_dlc_live.py` формирует production packet
-  `dual_dlc_live.pose.v1` с raw pose points и metadata.
+- `OpenEphysBridge.send()` из `dual_rt_dlc_live.py` формирует binary pose production packet by default;
+  JSON `dual_dlc_live.pose.v1` с raw pose points и metadata remains available as fallback.

@@ -6,11 +6,17 @@ Default mode in `config_dual_rt_dlc_live.py`:
 
 ```python
 DUAL_OE_BRIDGE_PACKET_MODE = "pose"
+DUAL_OE_BRIDGE_WIRE_FORMAT = "binary"
+DUAL_FAST_POSE_ONLY = True
+DUAL_ENABLE_BATCH_INFERENCE = True
 ```
 
-Python sends `dual_dlc_live.pose.v1` packets with raw pose points and metadata.
+Python sends compact binary pose packets with raw pose points and metadata.
 The Open Ephys plugin computes filtering, valid triplets, hind angles and TTL
-lines itself. Python no longer has to send `ttl_lines` in the default mode.
+lines itself. Python no longer has to send `ttl_lines` or compute angles in the
+default mode. If binary transport is not desired, set
+`DUAL_OE_BRIDGE_WIRE_FORMAT = "json"`; the payload then uses
+`dual_dlc_live.pose.v1`.
 
 Synthetic test without cameras:
 
@@ -18,11 +24,27 @@ Synthetic test without cameras:
 C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --mode pose --count 5 --interval 0.025 --wait-ack
 ```
 
+JSON pose fallback test:
+
+```powershell
+C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --mode pose --wire-format json --count 5 --interval 0.025 --wait-ack
+```
+
 Legacy compatibility test:
 
 ```powershell
 C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --mode ttl --count 5 --interval 0.025 --wait-ack
 ```
+
+Important current behavior:
+
+- Default pose mode sends raw pose points, not `ttl_lines`.
+- `DUAL_FAST_POSE_ONLY = True` disables Python-side filter/triplet/angle work
+  for the Open Ephys path.
+- The plugin UI is the source of truth for `angle_trigger_enabled`,
+  `angle_threshold_deg`, filter settings and refractory timing.
+- Python `DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG` is used only by the legacy
+  `DUAL_OE_BRIDGE_PACKET_MODE = "ttl"` path.
 
 Этот файл - короткая рабочая инструкция со стороны DLC-проекта. Полная
 документация плагина лежит здесь:

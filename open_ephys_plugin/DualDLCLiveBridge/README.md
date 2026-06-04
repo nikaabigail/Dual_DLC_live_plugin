@@ -2,9 +2,10 @@
 
 ## Current protocol
 
-Default Python bridge mode sends `dual_dlc_live.pose.v1` UDP packets. These
-packets contain raw pose points and timing metadata, not ready-made TTL
-decisions.
+Default Python bridge mode sends compact binary UDP pose packets (`DDLP`/v1).
+These packets contain raw pose points and timing metadata, not ready-made TTL
+decisions. JSON `dual_dlc_live.pose.v1` packets are still supported as fallback
+when `DUAL_OE_BRIDGE_WIRE_FORMAT = "json"`.
 
 This plugin computes:
 
@@ -25,8 +26,18 @@ line 4..7 = reserved
 ```
 
 The old `dual_dlc_live.v1`/`ttl_lines` packet is still supported as legacy
-input. Use `send_dual_dlc_bridge_test.py --mode pose` for the current synthetic
-test and `--mode ttl` for legacy compatibility.
+input. Use `send_dual_dlc_bridge_test.py --mode pose --wire-format binary` for
+the current synthetic test, `--wire-format json` for JSON pose compatibility,
+and `--mode ttl` for legacy compatibility.
+
+Important current behavior:
+
+- Default pose mode receives raw pose points, not `ttl_lines`.
+- The plugin computes filter, triplet validity, angle, TTL word and refractory
+  gating.
+- `angle_trigger_enabled` and `angle_threshold_deg` in the plugin UI control
+  lines `2` and `3`.
+- Python `DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG` is only for legacy `ttl` mode.
 
 Этот документ описывает, как запускать связку:
 
@@ -36,8 +47,8 @@ test and `--mode ttl` for legacy compatibility.
 
 Плагин называется `Dual DLCLive Bridge`. Он не запускает DLCLive и не читает
 камеры. Камерами и нейросетью управляет отдельный Python-процесс
-`dual_rt_dlc_live.py`, а Open Ephys получает от него только маленькие UDP JSON
-пакеты с raw pose points и metadata. TTL-состояние считается внутри plugin.
+`dual_rt_dlc_live.py`, а Open Ephys получает от него только маленькие UDP
+binary packets с raw pose points и metadata. TTL-состояние считается внутри plugin.
 
 ## Где лежат файлы
 

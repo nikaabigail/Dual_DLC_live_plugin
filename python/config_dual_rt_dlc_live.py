@@ -98,5 +98,22 @@ DUAL_OE_BRIDGE_HOST = "127.0.0.1"
 DUAL_OE_BRIDGE_PORT = 47000
 DUAL_OE_BRIDGE_SEND_EVERY_N_RESULTS = 1
 DUAL_OE_BRIDGE_PACKET_MODE = "pose"
+DUAL_OE_BRIDGE_WIRE_FORMAT = "binary"  # "binary" or "json"; binary is used only with packet_mode="pose".
 DUAL_OE_BRIDGE_REQUEST_ACK = False
 DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG = None
+
+
+# ============================================================================
+# Optimization switches
+# ============================================================================
+# In the normal plugin-driven mode Python sends only raw pose points. Filtering,
+# side selection, angle calculation, refractory logic and TTL generation are done
+# in the Open Ephys plugin. Disable this only when you need Python-side angle
+# diagnostics or the legacy ttl_lines packet mode.
+DUAL_FAST_POSE_ONLY = True
+
+# If DLCLive uses the supported PyTorch runner path, the two camera frames are
+# inferred as one mini-batch after the first warm-up frame. Unsupported model
+# layouts automatically fall back to the sequential path.
+DUAL_ENABLE_BATCH_INFERENCE = True
+DUAL_BATCH_FALLBACK_TO_SEQUENTIAL = True

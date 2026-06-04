@@ -10,6 +10,7 @@ import csv
 import json
 import logging
 import socket
+import struct
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,22 @@ import rt_dlc_live as live
 
 
 live.config = config
+
+
+BINARY_POSE_MAGIC = b"DDLP"
+BINARY_POSE_VERSION = 1
+BINARY_FLAG_ACK = 1 << 0
+BINARY_POSE_POINT_NAMES = [
+    "hl_ankle_l",
+    "hl_ankle_r",
+    "hl_hip_l",
+    "hl_hip_r",
+    "hl_toes_l",
+    "hl_toes_r",
+]
+BINARY_HEADER_STRUCT = struct.Struct("<4sHHqdffHH")
+BINARY_SIDE_STRUCT = struct.Struct("<qqdfIHH")
+BINARY_POINT_STRUCT = struct.Struct("<fff")
 
 
 @dataclass
@@ -76,6 +93,7 @@ class OpenEphysBridge:
         self.port = int(getattr(config, "DUAL_OE_BRIDGE_PORT", 47000))
         self.send_every = max(1, int(getattr(config, "DUAL_OE_BRIDGE_SEND_EVERY_N_RESULTS", 1)))
         self.packet_mode = str(getattr(config, "DUAL_OE_BRIDGE_PACKET_MODE", "pose")).strip().lower()
+        self.wire_format = str(getattr(config, "DUAL_OE_BRIDGE_WIRE_FORMAT", "json")).strip().lower()
         self.request_ack = bool(getattr(config, "DUAL_OE_BRIDGE_REQUEST_ACK", False))
         threshold = getattr(config, "DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG", None)
         self.angle_threshold_deg = None if threshold is None else float(threshold)
@@ -87,10 +105,11 @@ class OpenEphysBridge:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setblocking(False)
         self.logger.info(
-            "Open Ephys bridge enabled: UDP %s:%d mode=%s",
+            "Open Ephys bridge enabled: UDP %s:%d mode=%s wire=%s",
             self.host,
             self.port,
             self.packet_mode,
+            self.wire_format if self.packet_mode == "pose" else "json",
         )
 
     def close(self) -> None:
@@ -102,9 +121,12 @@ class OpenEphysBridge:
         if self.sock is None or result.pair_index % self.send_every != 0:
             return
 
-        payload = self._build_payload(result, left, right)
         try:
-            data = (json.dumps(payload, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+            if self.packet_mode == "pose" and self.wire_format == "binary":
+                data = self._build_binary_pose_payload(result, left, right)
+            else:
+                payload = self._build_payload(result, left, right)
+                data = (json.dumps(payload, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
             self.sock.sendto(data, (self.host, self.port))
         except Exception as exc:
             self.logger.warning("Open Ephys bridge send failed: %s", exc)
@@ -161,6 +183,79 @@ class OpenEphysBridge:
         if self.request_ack:
             payload["ack"] = True
         return payload
+
+    def _build_binary_pose_payload(
+        self,
+        result: PairInferenceResult,
+        left: CameraRuntime,
+        right: CameraRuntime,
+    ) -> bytes:
+        flags = BINARY_FLAG_ACK if self.request_ack else 0
+        camera_dt_ms = float("nan") if result.camera_dt_ms is None else float(result.camera_dt_ms)
+        packet = bytearray()
+        packet.extend(
+            BINARY_HEADER_STRUCT.pack(
+                BINARY_POSE_MAGIC,
+                BINARY_POSE_VERSION,
+                flags,
+                int(result.pair_index),
+                time.time(),
+                float(result.host_dt_ms),
+                camera_dt_ms,
+                len(config.DUAL_USE_POINTS),
+                0,
+            )
+        )
+        self._append_binary_side(packet, left, result.left_packet, result.left_result)
+        self._append_binary_side(packet, right, result.right_packet, result.right_result)
+        return bytes(packet)
+
+    def _append_binary_side(
+        self,
+        packet: bytearray,
+        runtime: CameraRuntime,
+        frame_packet: live.FramePacket,
+        inference_result: dict[str, object],
+    ) -> None:
+        source_frame_id = -1 if frame_packet.source_frame_id is None else int(frame_packet.source_frame_id)
+        drops = max(0, min(int(runtime.source.dropped_total), 0xFFFFFFFF))
+        raw_visible = max(0, min(int(inference_result["raw_visible"]), 0xFFFF))
+        packet.extend(
+            BINARY_SIDE_STRUCT.pack(
+                int(frame_packet.frame_id),
+                source_frame_id,
+                float(frame_packet.capture_ts),
+                float(inference_result["infer_ms"]),
+                drops,
+                raw_visible,
+                0,
+            )
+        )
+
+        raw_points = inference_result.get("raw_points", {})
+        if not isinstance(raw_points, dict):
+            raw_points = {}
+        for name in config.DUAL_USE_POINTS:
+            point = raw_points.get(name, {})
+            if not isinstance(point, dict):
+                point = {}
+            packet.extend(
+                BINARY_POINT_STRUCT.pack(
+                    self._finite_or_nan(point.get("x")),
+                    self._finite_or_nan(point.get("y")),
+                    self._finite_or_nan(point.get("likelihood")),
+                )
+            )
+
+    @staticmethod
+    def _finite_or_nan(value: object) -> float:
+        if value is None:
+            return float("nan")
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return float("nan")
+        return result if np.isfinite(result) else float("nan")
 
     def _build_ttl_payload(
         self,
@@ -302,6 +397,14 @@ def validate_dual_config() -> None:
     bridge_mode = str(getattr(config, "DUAL_OE_BRIDGE_PACKET_MODE", "pose")).strip().lower()
     if bridge_mode not in {"pose", "ttl"}:
         raise ValueError('DUAL_OE_BRIDGE_PACKET_MODE must be "pose" or "ttl".')
+    bridge_wire = str(getattr(config, "DUAL_OE_BRIDGE_WIRE_FORMAT", "json")).strip().lower()
+    if bridge_wire not in {"binary", "json"}:
+        raise ValueError('DUAL_OE_BRIDGE_WIRE_FORMAT must be "binary" or "json".')
+    if bridge_wire == "binary" and list(config.DUAL_USE_POINTS) != BINARY_POSE_POINT_NAMES:
+        raise ValueError(
+            "Binary Open Ephys bridge packets use a fixed point order. "
+            "Set DUAL_OE_BRIDGE_WIRE_FORMAT='json' for custom DUAL_USE_POINTS."
+        )
 
 
 def build_camera_runtime(camera_cfg: dict[str, object]) -> CameraRuntime:
@@ -483,6 +586,86 @@ def validate_native_shape(runtime: CameraRuntime, packet: live.FramePacket, logg
     runtime.warned_shape = True
 
 
+def bridge_packet_mode() -> str:
+    return str(getattr(config, "DUAL_OE_BRIDGE_PACKET_MODE", "pose")).strip().lower()
+
+
+def fast_pose_only_enabled() -> bool:
+    return (
+        bool(getattr(config, "DUAL_FAST_POSE_ONLY", True))
+        and bool(getattr(config, "DUAL_OE_BRIDGE_ENABLED", False))
+        and bridge_packet_mode() == "pose"
+    )
+
+
+def python_postprocess_enabled() -> bool:
+    return not fast_pose_only_enabled()
+
+
+def update_inference_fps(runtime: CameraRuntime, end_perf: float) -> None:
+    if runtime.prev_infer_end_perf is not None:
+        dt = end_perf - runtime.prev_infer_end_perf
+        if dt > 0:
+            runtime.fps_dlc = 1.0 / dt
+    runtime.prev_infer_end_perf = end_perf
+
+
+def raw_pose_result(
+    runtime: CameraRuntime,
+    pose: np.ndarray,
+    bodypart_to_idx: dict[str, int],
+    infer_ms: float,
+) -> dict[str, object]:
+    raw_points = live.pose_to_points(np.asarray(pose), bodypart_to_idx, config.DUAL_USE_POINTS)
+    raw_visible = live.count_visible_points(raw_points)
+    return {
+        "infer_ms": infer_ms,
+        "raw_points": raw_points,
+        "raw_visible": raw_visible,
+        "filtered_visible": raw_visible,
+        "draw_points": raw_points,
+        "has_triplet": False,
+        "hind_angle": None,
+        "picked_side": runtime.name,
+        "reason": {},
+        "python_postprocess": False,
+    }
+
+
+def processed_pose_result(
+    runtime: CameraRuntime,
+    pose: np.ndarray,
+    bodypart_to_idx: dict[str, int],
+    infer_ms: float,
+) -> dict[str, object]:
+    processor = runtime.processor
+    raw_pose = processor.last_raw_pose if processor is not None and processor.last_raw_pose is not None else np.asarray(pose)
+    filtered_pose = (
+        processor.last_filtered_pose
+        if processor is not None and processor.last_filtered_pose is not None
+        else np.asarray(pose)
+    )
+    raw_points = live.pose_to_points(raw_pose, bodypart_to_idx, config.DUAL_USE_POINTS)
+    filtered_points = live.pose_to_points(filtered_pose, bodypart_to_idx, config.DUAL_USE_POINTS)
+    picked_side, picked_triplet = pick_triplet(runtime.name, filtered_points)
+    canonical = normalize_triplet(filtered_points, picked_triplet)
+    draw_points, has_triplet, reason = live.evaluate_triplet(canonical, ["hip", "ankle", "toes"])
+    angle = angle_from_canonical(draw_points) if has_triplet else None
+
+    return {
+        "infer_ms": infer_ms,
+        "raw_points": raw_points,
+        "raw_visible": live.count_visible_points(raw_points),
+        "filtered_visible": live.count_visible_points(filtered_points),
+        "draw_points": draw_points,
+        "has_triplet": has_triplet,
+        "hind_angle": angle,
+        "picked_side": picked_side,
+        "reason": reason,
+        "python_postprocess": True,
+    }
+
+
 def run_inference(
     dlc_live,
     initialized: bool,
@@ -490,9 +673,6 @@ def run_inference(
     packet: live.FramePacket,
     bodypart_to_idx: dict[str, int],
 ) -> tuple[bool, dict[str, object]]:
-    if runtime.processor is None:
-        raise RuntimeError(f"Processor is not initialized for {runtime.name}.")
-
     dlc_live.processor = runtime.processor
     start = time.perf_counter()
     if not initialized:
@@ -527,33 +707,109 @@ def run_inference(
     end = time.perf_counter()
 
     infer_ms = (end - start) * 1000.0
-    if runtime.prev_infer_end_perf is not None:
-        dt = end - runtime.prev_infer_end_perf
-        if dt > 0:
-            runtime.fps_dlc = 1.0 / dt
-    runtime.prev_infer_end_perf = end
+    update_inference_fps(runtime, end)
 
-    processor = runtime.processor
-    raw_pose = processor.last_raw_pose if processor.last_raw_pose is not None else np.asarray(pose)
-    filtered_pose = processor.last_filtered_pose if processor.last_filtered_pose is not None else np.asarray(pose)
-    raw_points = live.pose_to_points(raw_pose, bodypart_to_idx, config.DUAL_USE_POINTS)
-    filtered_points = live.pose_to_points(filtered_pose, bodypart_to_idx, config.DUAL_USE_POINTS)
-    picked_side, picked_triplet = pick_triplet(runtime.name, filtered_points)
-    canonical = normalize_triplet(filtered_points, picked_triplet)
-    draw_points, has_triplet, reason = live.evaluate_triplet(canonical, ["hip", "ankle", "toes"])
-    angle = angle_from_canonical(draw_points) if has_triplet else None
+    if runtime.processor is None:
+        return initialized, raw_pose_result(runtime, np.asarray(pose), bodypart_to_idx, infer_ms)
+    return initialized, processed_pose_result(runtime, np.asarray(pose), bodypart_to_idx, infer_ms)
 
-    return initialized, {
-        "infer_ms": infer_ms,
-        "raw_points": raw_points,
-        "raw_visible": live.count_visible_points(raw_points),
-        "filtered_visible": live.count_visible_points(filtered_points),
-        "draw_points": draw_points,
-        "has_triplet": has_triplet,
-        "hind_angle": angle,
-        "picked_side": picked_side,
-        "reason": reason,
-    }
+
+def batch_inference_supported(dlc_live) -> bool:
+    if not fast_pose_only_enabled():
+        return False
+    if getattr(dlc_live, "display", None) is not None:
+        return False
+    if bool(getattr(dlc_live, "dynamic", (False, 0.5, 10))[0]):
+        return False
+
+    runner = getattr(dlc_live, "runner", None)
+    if runner is None:
+        return False
+    if getattr(runner, "model", None) is None or getattr(runner, "pose_transform", None) is None:
+        return False
+    if getattr(runner, "detector", None) is not None or getattr(runner, "dynamic", None) is not None:
+        return False
+    if not bool(getattr(runner, "single_animal", True)):
+        return False
+    return True
+
+
+def postprocess_pose_without_processor(dlc_live, pose: np.ndarray) -> np.ndarray:
+    pose_arr = np.array(pose, copy=True)
+    resize = getattr(dlc_live, "resize", None)
+    if resize is not None:
+        pose_arr[..., :2] *= 1.0 / float(resize)
+
+    cropping = getattr(dlc_live, "cropping", None)
+    if cropping is not None:
+        pose_arr[..., 0] += cropping[0]
+        pose_arr[..., 1] += cropping[2]
+
+    dynamic_cropping = getattr(dlc_live, "dynamic_cropping", None)
+    if dynamic_cropping is not None:
+        pose_arr[..., 0] += dynamic_cropping[0]
+        pose_arr[..., 1] += dynamic_cropping[2]
+    return pose_arr
+
+
+def run_batch_inference(
+    dlc_live,
+    left: CameraRuntime,
+    right: CameraRuntime,
+    left_packet: live.FramePacket,
+    right_packet: live.FramePacket,
+    bodypart_to_idx: dict[str, int],
+) -> tuple[dict[str, object], dict[str, object]]:
+    if not batch_inference_supported(dlc_live):
+        raise RuntimeError("DLCLive runner does not support the fast dual-frame batch path.")
+
+    import torch
+
+    runner = dlc_live.runner
+    dlc_live.processor = None
+    if left_packet.frame.ndim >= 2 or right_packet.frame.ndim >= 2:
+        dlc_live.convert2rgb = True
+
+    start = time.perf_counter()
+    processed_frames = [dlc_live.process_frame(left_packet.frame), dlc_live.process_frame(right_packet.frame)]
+    if processed_frames[0].shape != processed_frames[1].shape:
+        raise RuntimeError(f"Batch frames must have identical shapes, got {processed_frames[0].shape} and {processed_frames[1].shape}.")
+
+    tensors = []
+    for processed_frame in processed_frames:
+        tensor = torch.from_numpy(processed_frame).permute(2, 0, 1)
+        transformed = runner.pose_transform(tensor)
+        if transformed.dim() != 3:
+            raise RuntimeError(f"Expected 3D transformed pose tensor, got {tuple(transformed.shape)}.")
+        tensors.append(transformed)
+
+    with torch.inference_mode():
+        model_input = torch.stack(tensors, dim=0).to(runner.device)
+        if str(getattr(runner, "precision", "FP32")).upper() == "FP16":
+            model_input = model_input.half()
+        outputs = runner.model(model_input)
+        batch_pose = runner.model.get_predictions(outputs)["bodypart"]["poses"]
+
+    poses: list[np.ndarray] = []
+    for index in range(2):
+        pose = batch_pose[index]
+        if len(pose) == 0:
+            bodyparts, coords = pose.shape[-2:]
+            pose = torch.zeros((bodyparts, coords), dtype=pose.dtype, device=pose.device)
+        else:
+            pose = pose[0]
+        poses.append(postprocess_pose_without_processor(dlc_live, pose.detach().cpu().numpy()))
+
+    if poses:
+        dlc_live.pose = poses[-1]
+    end = time.perf_counter()
+    infer_ms_each = (end - start) * 500.0
+    update_inference_fps(left, end)
+    update_inference_fps(right, end)
+    return (
+        raw_pose_result(left, poses[0], bodypart_to_idx, infer_ms_each),
+        raw_pose_result(right, poses[1], bodypart_to_idx, infer_ms_each),
+    )
 
 
 def inference_loop(
@@ -563,12 +819,14 @@ def inference_loop(
     right: CameraRuntime,
     bodypart_to_idx: dict[str, int],
     state: InferenceState,
+    logger: Optional[logging.Logger] = None,
 ) -> None:
     initialized = False
     sdk_baseline_ms: Optional[float] = None
     last_pair_seq = (-1, -1)
     pair_index = 0
     process_every = max(1, int(getattr(config, "DUAL_PROCESS_EVERY_N_PAIRS", 1)))
+    batch_disabled = False
 
     try:
         while not stop_event.is_set():
@@ -599,20 +857,57 @@ def inference_loop(
                 else camera_dt_raw_ms - sdk_baseline_ms
             )
 
-            initialized, left_result = run_inference(
-                dlc_live,
-                initialized,
-                left,
-                left_packet,
-                bodypart_to_idx,
+            use_batch = (
+                initialized
+                and not batch_disabled
+                and bool(getattr(config, "DUAL_ENABLE_BATCH_INFERENCE", True))
+                and batch_inference_supported(dlc_live)
             )
-            initialized, right_result = run_inference(
-                dlc_live,
-                initialized,
-                right,
-                right_packet,
-                bodypart_to_idx,
-            )
+            if use_batch:
+                try:
+                    left_result, right_result = run_batch_inference(
+                        dlc_live,
+                        left,
+                        right,
+                        left_packet,
+                        right_packet,
+                        bodypart_to_idx,
+                    )
+                except Exception as exc:
+                    if not bool(getattr(config, "DUAL_BATCH_FALLBACK_TO_SEQUENTIAL", True)):
+                        raise
+                    batch_disabled = True
+                    if logger is not None:
+                        logger.warning("Batch inference disabled; falling back to sequential DLCLive calls: %s", exc)
+                    initialized, left_result = run_inference(
+                        dlc_live,
+                        initialized,
+                        left,
+                        left_packet,
+                        bodypart_to_idx,
+                    )
+                    initialized, right_result = run_inference(
+                        dlc_live,
+                        initialized,
+                        right,
+                        right_packet,
+                        bodypart_to_idx,
+                    )
+            else:
+                initialized, left_result = run_inference(
+                    dlc_live,
+                    initialized,
+                    left,
+                    left_packet,
+                    bodypart_to_idx,
+                )
+                initialized, right_result = run_inference(
+                    dlc_live,
+                    initialized,
+                    right,
+                    right_packet,
+                    bodypart_to_idx,
+                )
 
             result = PairInferenceResult(
                 pair_index=pair_index,
@@ -791,14 +1086,20 @@ def main() -> None:
             raise ValueError(f"DUAL_USE_POINTS are missing from the exported model: {missing_points}")
 
         bodypart_to_idx = {name: i for i, name in enumerate(body_parts)}
-        for runtime in runtimes:
-            runtime.processor = live.OnlinePoseProcessor(body_parts=body_parts, use_points=config.DUAL_USE_POINTS)
+        if python_postprocess_enabled():
+            for runtime in runtimes:
+                runtime.processor = live.OnlinePoseProcessor(body_parts=body_parts, use_points=config.DUAL_USE_POINTS)
+            logger.info("Python pose postprocess enabled for diagnostics/legacy TTL.")
+        else:
+            for runtime in runtimes:
+                runtime.processor = None
+            logger.info("Fast pose-only mode enabled: Python sends raw DLCLive points; plugin computes filters, angles and TTL.")
 
         logger.info("Model bodyparts loaded: %d; dual points=%s", len(body_parts), config.DUAL_USE_POINTS)
 
         inference_thread = Thread(
             target=inference_loop,
-            args=(stop_event, dlc_live, left, right, bodypart_to_idx, inference_state),
+            args=(stop_event, dlc_live, left, right, bodypart_to_idx, inference_state, logger),
             daemon=True,
         )
         inference_thread.start()

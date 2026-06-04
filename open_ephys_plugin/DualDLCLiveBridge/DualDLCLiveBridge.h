@@ -84,13 +84,20 @@ private:
     void ensureSocket();
     void closeSocket();
     void run() override;
+    bool applyDatagram (const char* data, int numBytes, String& ackMessage);
     bool applyMessage (const String& message, String& ackMessage);
     bool applyTtlMessage (const var& parsed, uint8& ttlWord);
     bool applyPoseMessage (const var& parsed, uint8& ttlWord);
+    bool applyBinaryPosePacket (const char* data, int numBytes, uint8& ttlWord, int64& pairIndex, bool& requestAck);
     SidePoseResult evaluateSidePose (const var& sideObject,
                                      const String& cameraName,
                                      const TripletConfig& triplets,
                                      FilterStateMap& filterStates);
+    SidePoseResult evaluateSidePosePoints (const PosePointMap& rawPoints,
+                                           int64 frameId,
+                                           const String& cameraName,
+                                           const TripletConfig& triplets,
+                                           FilterStateMap& filterStates);
     TripletConfig readTripletConfig (const var& parsed) const;
     PosePoint readPosePoint (const var& rawPoints, const String& name) const;
     PosePoint filterPoint (const String& name,
