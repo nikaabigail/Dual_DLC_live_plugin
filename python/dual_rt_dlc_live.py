@@ -54,6 +54,7 @@ class CameraRuntime:
     lock: Lock = field(default_factory=Lock)
     latest_packet: Optional[live.FramePacket] = None
     latest_seq: int = 0
+    latest_read_ms: float = 0.0
     prev_capture_ts: Optional[float] = None
     fps_cam: float = 0.0
     fps_dlc: float = 0.0
@@ -81,6 +82,41 @@ class InferenceState:
     processed_pairs: int = 0
     skipped_pairs: int = 0
     last_error: Optional[BaseException] = None
+
+
+@dataclass
+class StageProfiler:
+    enabled: bool
+    alpha: float = 0.1
+    lock: Lock = field(default_factory=Lock)
+    last_ms: dict[str, float] = field(default_factory=dict)
+    avg_ms: dict[str, float] = field(default_factory=dict)
+    samples: dict[str, int] = field(default_factory=dict)
+
+    ORDER = ("camera/read", "preprocess", "inference", "pack/send", "display")
+
+    def observe(self, stage: str, elapsed_ms: float) -> None:
+        if not self.enabled:
+            return
+        value = max(0.0, float(elapsed_ms))
+        with self.lock:
+            count = self.samples.get(stage, 0) + 1
+            previous = self.avg_ms.get(stage, value)
+            self.last_ms[stage] = value
+            self.avg_ms[stage] = value if count == 1 else previous + self.alpha * (value - previous)
+            self.samples[stage] = count
+
+    def snapshot(self) -> tuple[dict[str, float], dict[str, float]]:
+        with self.lock:
+            return dict(self.last_ms), dict(self.avg_ms)
+
+    def format_snapshot(self) -> str:
+        last, avg = self.snapshot()
+
+        def format_values(values: dict[str, float]) -> str:
+            return " ".join(f"{name}={values.get(name, 0.0):.2f}" for name in self.ORDER)
+
+        return f"last_ms {format_values(last)} | avg_ms {format_values(avg)}"
 
 
 class OpenEphysBridge:
@@ -131,6 +167,19 @@ class OpenEphysBridge:
         except Exception as exc:
             self.logger.warning("Open Ephys bridge send failed: %s", exc)
 
+    def _raw_points_for_payload(self, result: dict[str, object]) -> dict[str, dict[str, float | None]]:
+        raw_points = result.get("raw_points")
+        if isinstance(raw_points, dict):
+            return raw_points
+
+        raw_pose_array = result.get("raw_pose_array")
+        if isinstance(raw_pose_array, np.ndarray):
+            points = pose_array_to_points(raw_pose_array, config.DUAL_USE_POINTS)
+            result["raw_points"] = points
+            return points
+
+        return pose_array_to_points(empty_pose_array(), config.DUAL_USE_POINTS)
+
     def _side_payload(
         self,
         runtime: CameraRuntime,
@@ -145,7 +194,7 @@ class OpenEphysBridge:
             "infer_ms": float(result["infer_ms"]),
             "drops": int(runtime.source.dropped_total),
             "raw_visible": int(result["raw_visible"]),
-            "raw_points": result["raw_points"],
+            "raw_points": self._raw_points_for_payload(result),
         }
 
     def _angle_trigger(self, result: dict[str, object]) -> bool:
@@ -232,20 +281,26 @@ class OpenEphysBridge:
             )
         )
 
+        packet.extend(self._binary_pose_bytes(inference_result))
+
+    def _binary_pose_bytes(self, inference_result: dict[str, object]) -> bytes:
+        raw_pose_array = inference_result.get("raw_pose_array")
+        if isinstance(raw_pose_array, np.ndarray):
+            pose_array = np.asarray(raw_pose_array, dtype=np.float32)
+            if pose_array.shape == (len(config.DUAL_USE_POINTS), 3):
+                return pose_array.astype("<f4", copy=False).tobytes(order="C")
+
         raw_points = inference_result.get("raw_points", {})
-        if not isinstance(raw_points, dict):
-            raw_points = {}
-        for name in config.DUAL_USE_POINTS:
-            point = raw_points.get(name, {})
-            if not isinstance(point, dict):
-                point = {}
-            packet.extend(
-                BINARY_POINT_STRUCT.pack(
-                    self._finite_or_nan(point.get("x")),
-                    self._finite_or_nan(point.get("y")),
-                    self._finite_or_nan(point.get("likelihood")),
-                )
-            )
+        point_array = empty_pose_array()
+        if isinstance(raw_points, dict):
+            for index, name in enumerate(config.DUAL_USE_POINTS):
+                point = raw_points.get(name, {})
+                if not isinstance(point, dict):
+                    continue
+                point_array[index, 0] = self._finite_or_nan(point.get("x"))
+                point_array[index, 1] = self._finite_or_nan(point.get("y"))
+                point_array[index, 2] = self._finite_or_nan(point.get("likelihood"))
+        return point_array.astype("<f4", copy=False).tobytes(order="C")
 
     @staticmethod
     def _finite_or_nan(value: object) -> float:
@@ -436,14 +491,18 @@ def build_camera_runtime(camera_cfg: dict[str, object]) -> CameraRuntime:
     )
 
 
-def reader_loop(runtime: CameraRuntime, stop_event: Event) -> None:
+def reader_loop(runtime: CameraRuntime, stop_event: Event, profiler: Optional[StageProfiler] = None) -> None:
     sleep_s = max(0.0, float(getattr(config, "DUAL_READER_SLEEP_MS", 1.0)) / 1000.0)
     try:
         while not stop_event.is_set():
+            read_start = time.perf_counter()
             ok, packet = runtime.source.read()
+            read_ms = (time.perf_counter() - read_start) * 1000.0
             if not ok or packet is None:
                 time.sleep(sleep_s)
                 continue
+            if profiler is not None:
+                profiler.observe("camera/read", read_ms)
 
             if runtime.prev_capture_ts is not None:
                 dt = packet.capture_ts - runtime.prev_capture_ts
@@ -454,14 +513,15 @@ def reader_loop(runtime: CameraRuntime, stop_event: Event) -> None:
             with runtime.lock:
                 runtime.latest_packet = packet
                 runtime.latest_seq += 1
+                runtime.latest_read_ms = read_ms
     except BaseException as exc:
         runtime.last_error = exc
         stop_event.set()
 
 
-def get_latest(runtime: CameraRuntime) -> tuple[int, Optional[live.FramePacket]]:
+def get_latest(runtime: CameraRuntime) -> tuple[int, Optional[live.FramePacket], float]:
     with runtime.lock:
-        return runtime.latest_seq, runtime.latest_packet
+        return runtime.latest_seq, runtime.latest_packet, runtime.latest_read_ms
 
 
 def wait_for_initial_pair(
@@ -471,8 +531,8 @@ def wait_for_initial_pair(
 ) -> tuple[live.FramePacket, live.FramePacket]:
     deadline = time.perf_counter() + int(getattr(config, "DUAL_PAIR_WAIT_TIMEOUT_MS", 2000)) / 1000.0
     while not stop_event.is_set() and time.perf_counter() < deadline:
-        _, left_packet = get_latest(left)
-        _, right_packet = get_latest(right)
+        _, left_packet, _ = get_latest(left)
+        _, right_packet, _ = get_latest(right)
         if left_packet is not None and right_packet is not None:
             return left_packet, right_packet
         time.sleep(0.002)
@@ -610,20 +670,149 @@ def update_inference_fps(runtime: CameraRuntime, end_perf: float) -> None:
     runtime.prev_infer_end_perf = end_perf
 
 
+def empty_pose_array() -> np.ndarray:
+    return np.full((len(config.DUAL_USE_POINTS), 3), np.nan, dtype=np.float32)
+
+
+def pose_to_compact_array(
+    pose: np.ndarray | None,
+    bodypart_to_idx: dict[str, int],
+    names: list[str],
+) -> np.ndarray:
+    points = np.full((len(names), 3), np.nan, dtype=np.float32)
+    if pose is None:
+        return points
+
+    pose_arr = np.asarray(pose)
+    if pose_arr.ndim == 3 and pose_arr.shape[0] == 1:
+        pose_arr = pose_arr[0]
+    if pose_arr.ndim != 2 or pose_arr.shape[1] < 3:
+        return points
+
+    for row_index, name in enumerate(names):
+        pose_index = bodypart_to_idx.get(name)
+        if pose_index is None or pose_index >= pose_arr.shape[0]:
+            continue
+        row = pose_arr[pose_index, :3]
+        if np.all(np.isfinite(row)):
+            points[row_index, :] = row.astype(np.float32, copy=False)
+    return points
+
+
+def count_visible_pose_array(points: np.ndarray) -> int:
+    if points.ndim != 2 or points.shape[1] < 3:
+        return 0
+    visible = (
+        np.isfinite(points[:, 0])
+        & np.isfinite(points[:, 1])
+        & np.isfinite(points[:, 2])
+        & (points[:, 2] >= float(config.CONF_THRESH_DRAW))
+    )
+    return int(np.count_nonzero(visible))
+
+
+def pose_array_to_points(
+    points: np.ndarray,
+    names: list[str],
+) -> dict[str, dict[str, float | None]]:
+    result = {name: {"x": None, "y": None, "likelihood": None} for name in names}
+    arr = np.asarray(points)
+    if arr.ndim != 2 or arr.shape[1] < 3:
+        return result
+
+    for index, name in enumerate(names):
+        if index >= arr.shape[0]:
+            break
+        x, y, likelihood = arr[index, 0], arr[index, 1], arr[index, 2]
+        if np.isfinite(x) and np.isfinite(y) and np.isfinite(likelihood):
+            result[name] = {"x": float(x), "y": float(y), "likelihood": float(likelihood)}
+    return result
+
+
+def draw_points_for_result(result: dict[str, object]) -> dict[str, dict[str, float | None]]:
+    draw_points = result.get("draw_points")
+    if isinstance(draw_points, dict):
+        return draw_points
+
+    raw_pose_array = result.get("raw_pose_array")
+    if isinstance(raw_pose_array, np.ndarray):
+        points = pose_array_to_points(raw_pose_array, config.DUAL_USE_POINTS)
+        result["draw_points"] = points
+        return points
+
+    raw_points = result.get("raw_points")
+    if isinstance(raw_points, dict):
+        result["draw_points"] = raw_points
+        return raw_points
+
+    return pose_array_to_points(empty_pose_array(), config.DUAL_USE_POINTS)
+
+
+def print_model_device_after_init(dlc_live) -> None:
+    try:
+        runner = getattr(dlc_live, "runner", None)
+        model = getattr(dlc_live, "model", None) or getattr(runner, "model", None)
+        if model is not None:
+            first_param = next(model.parameters(), None)
+            print(
+                "DLC_MODEL_DEVICE_AFTER_INIT =",
+                first_param.device if first_param is not None else "no_params",
+            )
+        else:
+            print("DLC_MODEL_DEVICE_AFTER_INIT = model_is_none")
+    except Exception as exc:
+        print("DLC_MODEL_DEVICE_CHECK_FAILED =", exc)
+
+
+def run_raw_inference(
+    dlc_live,
+    initialized: bool,
+    packet: live.FramePacket,
+) -> tuple[bool, np.ndarray, float, float]:
+    if packet.frame.ndim >= 2:
+        dlc_live.convert2rgb = True
+
+    preprocess_start = time.perf_counter()
+    processed_frame = dlc_live.process_frame(packet.frame)
+    preprocess_end = time.perf_counter()
+
+    model_start = time.perf_counter()
+    if not initialized:
+        dlc_live.pose = dlc_live.runner.init_inference(processed_frame)
+        dlc_live.is_initialized = True
+        initialized = True
+        print_model_device_after_init(dlc_live)
+    else:
+        dlc_live.pose = dlc_live.runner.get_pose(processed_frame)
+    model_end = time.perf_counter()
+
+    pose = postprocess_pose_without_processor(dlc_live, np.asarray(dlc_live.pose))
+    dlc_live.pose = pose
+    return (
+        initialized,
+        pose,
+        (preprocess_end - preprocess_start) * 1000.0,
+        (model_end - model_start) * 1000.0,
+    )
+
+
 def raw_pose_result(
     runtime: CameraRuntime,
     pose: np.ndarray,
     bodypart_to_idx: dict[str, int],
     infer_ms: float,
+    preprocess_ms: float = 0.0,
+    model_infer_ms: Optional[float] = None,
 ) -> dict[str, object]:
-    raw_points = live.pose_to_points(np.asarray(pose), bodypart_to_idx, config.DUAL_USE_POINTS)
-    raw_visible = live.count_visible_points(raw_points)
+    raw_pose_array = pose_to_compact_array(np.asarray(pose), bodypart_to_idx, config.DUAL_USE_POINTS)
+    raw_visible = count_visible_pose_array(raw_pose_array)
     return {
         "infer_ms": infer_ms,
-        "raw_points": raw_points,
+        "preprocess_ms": preprocess_ms,
+        "model_infer_ms": infer_ms if model_infer_ms is None else model_infer_ms,
+        "raw_pose_array": raw_pose_array,
         "raw_visible": raw_visible,
         "filtered_visible": raw_visible,
-        "draw_points": raw_points,
         "has_triplet": False,
         "hind_angle": None,
         "picked_side": runtime.name,
@@ -654,6 +843,8 @@ def processed_pose_result(
 
     return {
         "infer_ms": infer_ms,
+        "preprocess_ms": 0.0,
+        "model_infer_ms": infer_ms,
         "raw_points": raw_points,
         "raw_visible": live.count_visible_points(raw_points),
         "filtered_visible": live.count_visible_points(filtered_points),
@@ -675,42 +866,41 @@ def run_inference(
 ) -> tuple[bool, dict[str, object]]:
     dlc_live.processor = runtime.processor
     start = time.perf_counter()
-    if not initialized:
-        pose = dlc_live.init_inference(
-            packet.frame,
-            frame_id=int(packet.frame_id),
-            ure_ts=float(packet.capture_ts),
-            stream_name=runtime.name,
-        )
-
-        try:
-            model = getattr(dlc_live, "model", None)
-            if model is not None:
-                first_param = next(model.parameters(), None)
-                print(
-                    "DLC_MODEL_DEVICE_AFTER_INIT =",
-                    first_param.device if first_param is not None else "no_params",
-                )
-            else:
-                print("DLC_MODEL_DEVICE_AFTER_INIT = model_is_none")
-        except Exception as exc:
-            print("DLC_MODEL_DEVICE_CHECK_FAILED =", exc)
-
-        initialized = True
+    if runtime.processor is None:
+        initialized, pose, preprocess_ms, model_infer_ms = run_raw_inference(dlc_live, initialized, packet)
     else:
-        pose = dlc_live.get_pose(
-            packet.frame,
-            frame_id=int(packet.frame_id),
-            capture_ts=float(packet.capture_ts),
-            stream_name=runtime.name,
-        )
+        if not initialized:
+            pose = dlc_live.init_inference(
+                packet.frame,
+                frame_id=int(packet.frame_id),
+                ure_ts=float(packet.capture_ts),
+                stream_name=runtime.name,
+            )
+            print_model_device_after_init(dlc_live)
+            initialized = True
+        else:
+            pose = dlc_live.get_pose(
+                packet.frame,
+                frame_id=int(packet.frame_id),
+                capture_ts=float(packet.capture_ts),
+                stream_name=runtime.name,
+            )
+        preprocess_ms = 0.0
+        model_infer_ms = (time.perf_counter() - start) * 1000.0
     end = time.perf_counter()
 
     infer_ms = (end - start) * 1000.0
     update_inference_fps(runtime, end)
 
     if runtime.processor is None:
-        return initialized, raw_pose_result(runtime, np.asarray(pose), bodypart_to_idx, infer_ms)
+        return initialized, raw_pose_result(
+            runtime,
+            np.asarray(pose),
+            bodypart_to_idx,
+            infer_ms,
+            preprocess_ms=preprocess_ms,
+            model_infer_ms=model_infer_ms,
+        )
     return initialized, processed_pose_result(runtime, np.asarray(pose), bodypart_to_idx, infer_ms)
 
 
@@ -771,10 +961,13 @@ def run_batch_inference(
         dlc_live.convert2rgb = True
 
     start = time.perf_counter()
+    preprocess_start = start
     processed_frames = [dlc_live.process_frame(left_packet.frame), dlc_live.process_frame(right_packet.frame)]
+    preprocess_end = time.perf_counter()
     if processed_frames[0].shape != processed_frames[1].shape:
         raise RuntimeError(f"Batch frames must have identical shapes, got {processed_frames[0].shape} and {processed_frames[1].shape}.")
 
+    model_start = time.perf_counter()
     tensors = []
     for processed_frame in processed_frames:
         tensor = torch.from_numpy(processed_frame).permute(2, 0, 1)
@@ -803,12 +996,28 @@ def run_batch_inference(
     if poses:
         dlc_live.pose = poses[-1]
     end = time.perf_counter()
+    preprocess_ms_each = (preprocess_end - preprocess_start) * 500.0
+    model_infer_ms_each = (end - model_start) * 500.0
     infer_ms_each = (end - start) * 500.0
     update_inference_fps(left, end)
     update_inference_fps(right, end)
     return (
-        raw_pose_result(left, poses[0], bodypart_to_idx, infer_ms_each),
-        raw_pose_result(right, poses[1], bodypart_to_idx, infer_ms_each),
+        raw_pose_result(
+            left,
+            poses[0],
+            bodypart_to_idx,
+            infer_ms_each,
+            preprocess_ms=preprocess_ms_each,
+            model_infer_ms=model_infer_ms_each,
+        ),
+        raw_pose_result(
+            right,
+            poses[1],
+            bodypart_to_idx,
+            infer_ms_each,
+            preprocess_ms=preprocess_ms_each,
+            model_infer_ms=model_infer_ms_each,
+        ),
     )
 
 
@@ -820,6 +1029,7 @@ def inference_loop(
     bodypart_to_idx: dict[str, int],
     state: InferenceState,
     logger: Optional[logging.Logger] = None,
+    profiler: Optional[StageProfiler] = None,
 ) -> None:
     initialized = False
     sdk_baseline_ms: Optional[float] = None
@@ -830,8 +1040,8 @@ def inference_loop(
 
     try:
         while not stop_event.is_set():
-            left_seq, left_packet = get_latest(left)
-            right_seq, right_packet = get_latest(right)
+            left_seq, left_packet, _ = get_latest(left)
+            right_seq, right_packet, _ = get_latest(right)
             if left_packet is None or right_packet is None:
                 time.sleep(0.001)
                 continue
@@ -907,6 +1117,18 @@ def inference_loop(
                     right,
                     right_packet,
                     bodypart_to_idx,
+                )
+
+            if profiler is not None:
+                profiler.observe(
+                    "preprocess",
+                    float(left_result.get("preprocess_ms", 0.0) or 0.0)
+                    + float(right_result.get("preprocess_ms", 0.0) or 0.0),
+                )
+                profiler.observe(
+                    "inference",
+                    float(left_result.get("model_infer_ms", left_result.get("infer_ms", 0.0)) or 0.0)
+                    + float(right_result.get("model_infer_ms", right_result.get("infer_ms", 0.0)) or 0.0),
                 )
 
             result = PairInferenceResult(
@@ -1029,6 +1251,10 @@ def main() -> None:
     right_writer = None
     csv_header_written = False
     inference_state = InferenceState()
+    profiler = StageProfiler(
+        enabled=bool(getattr(config, "DUAL_ENABLE_STAGE_PROFILER", True)),
+        alpha=float(getattr(config, "DUAL_PROFILE_EMA_ALPHA", 0.10)),
+    )
 
     try:
         bridge.open()
@@ -1046,7 +1272,7 @@ def main() -> None:
             )
 
         for runtime in runtimes:
-            thread = Thread(target=reader_loop, args=(runtime, stop_event), daemon=True)
+            thread = Thread(target=reader_loop, args=(runtime, stop_event, profiler), daemon=True)
             thread.start()
             threads.append(thread)
 
@@ -1099,13 +1325,15 @@ def main() -> None:
 
         inference_thread = Thread(
             target=inference_loop,
-            args=(stop_event, dlc_live, left, right, bodypart_to_idx, inference_state, logger),
+            args=(stop_event, dlc_live, left, right, bodypart_to_idx, inference_state, logger, profiler),
             daemon=True,
         )
         inference_thread.start()
         threads.append(inference_thread)
 
         visual_mode = bool(getattr(config, "DUAL_DISPLAY_WINDOW", True))
+        save_output_video = bool(getattr(config, "DUAL_SAVE_OUTPUT_VIDEO", False))
+        profile_log_every = max(1, int(getattr(config, "DUAL_PROFILE_LOG_EVERY_N_PAIRS", 120)))
         last_result_seq = -1
 
         while not stop_event.is_set():
@@ -1127,76 +1355,81 @@ def main() -> None:
             camera_dt_ms = result.camera_dt_ms
             left_result = result.left_result
             right_result = result.right_result
+            pack_send_start = time.perf_counter()
             bridge.send(result, left, right)
+            profiler.observe("pack/send", (time.perf_counter() - pack_send_start) * 1000.0)
             validate_native_shape(left, left_packet, logger)
             validate_native_shape(right, right_packet, logger)
 
-            left_metrics = {
-                "cam_fps": left.fps_cam,
-                "infer_fps": left.fps_dlc,
-                "infer_ms": left_result["infer_ms"],
-                "raw_visible": left_result["raw_visible"],
-                "filtered_visible": left_result["filtered_visible"],
-                "tracked_points": len(config.DUAL_USE_POINTS),
-                "triplet": left_result["has_triplet"],
-                "hind_angle": left_result["hind_angle"],
-                "source_drops": left.source.dropped_total,
-            }
-            right_metrics = {
-                "cam_fps": right.fps_cam,
-                "infer_fps": right.fps_dlc,
-                "infer_ms": right_result["infer_ms"],
-                "raw_visible": right_result["raw_visible"],
-                "filtered_visible": right_result["filtered_visible"],
-                "tracked_points": len(config.DUAL_USE_POINTS),
-                "triplet": right_result["has_triplet"],
-                "hind_angle": right_result["hind_angle"],
-                "source_drops": right.source.dropped_total,
-            }
+            display_start = time.perf_counter()
+            if visual_mode or save_output_video:
+                left_metrics = {
+                    "cam_fps": left.fps_cam,
+                    "infer_fps": left.fps_dlc,
+                    "infer_ms": left_result["infer_ms"],
+                    "raw_visible": left_result["raw_visible"],
+                    "filtered_visible": left_result["filtered_visible"],
+                    "tracked_points": len(config.DUAL_USE_POINTS),
+                    "triplet": left_result["has_triplet"],
+                    "hind_angle": left_result["hind_angle"],
+                    "source_drops": left.source.dropped_total,
+                }
+                right_metrics = {
+                    "cam_fps": right.fps_cam,
+                    "infer_fps": right.fps_dlc,
+                    "infer_ms": right_result["infer_ms"],
+                    "raw_visible": right_result["raw_visible"],
+                    "filtered_visible": right_result["filtered_visible"],
+                    "tracked_points": len(config.DUAL_USE_POINTS),
+                    "triplet": right_result["has_triplet"],
+                    "hind_angle": right_result["hind_angle"],
+                    "source_drops": right.source.dropped_total,
+                }
 
-            left_display = live.draw_overlay(left_packet.frame.copy(), left_result["draw_points"], left_metrics)
-            right_display = live.draw_overlay(right_packet.frame.copy(), right_result["draw_points"], right_metrics)
-            add_dual_text(
-                left_display,
-                left,
-                left_packet,
-                pair_index,
-                host_dt_ms,
-                camera_dt_ms,
-                str(left_result["picked_side"]),
-            )
-            add_dual_text(
-                right_display,
-                right,
-                right_packet,
-                pair_index,
-                host_dt_ms,
-                camera_dt_ms,
-                str(right_result["picked_side"]),
-            )
+                left_display = live.draw_overlay(left_packet.frame.copy(), draw_points_for_result(left_result), left_metrics)
+                right_display = live.draw_overlay(right_packet.frame.copy(), draw_points_for_result(right_result), right_metrics)
+                add_dual_text(
+                    left_display,
+                    left,
+                    left_packet,
+                    pair_index,
+                    host_dt_ms,
+                    camera_dt_ms,
+                    str(left_result["picked_side"]),
+                )
+                add_dual_text(
+                    right_display,
+                    right,
+                    right_packet,
+                    pair_index,
+                    host_dt_ms,
+                    camera_dt_ms,
+                    str(right_result["picked_side"]),
+                )
 
-            if bool(getattr(config, "DUAL_SAVE_OUTPUT_VIDEO", False)):
-                if left_writer is None:
-                    left_writer = make_writer(Path(config.DUAL_OUTPUT_LEFT_PATH), left_display, left.source.nominal_fps())
-                if right_writer is None:
-                    right_writer = make_writer(Path(config.DUAL_OUTPUT_RIGHT_PATH), right_display, right.source.nominal_fps())
-                left_writer.write(left_display)
-                right_writer.write(right_display)
+                if save_output_video:
+                    if left_writer is None:
+                        left_writer = make_writer(Path(config.DUAL_OUTPUT_LEFT_PATH), left_display, left.source.nominal_fps())
+                    if right_writer is None:
+                        right_writer = make_writer(Path(config.DUAL_OUTPUT_RIGHT_PATH), right_display, right.source.nominal_fps())
+                    left_writer.write(left_display)
+                    right_writer.write(right_display)
 
-            if visual_mode:
-                scale = float(getattr(config, "DUAL_SHOW_SCALE", 1.0))
-                if scale != 1.0:
-                    left_show = cv2.resize(left_display, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                    right_show = cv2.resize(right_display, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                else:
-                    left_show = left_display
-                    right_show = right_display
-                cv2.imshow(f"{config.DUAL_WINDOW_NAME} | left", left_show)
-                cv2.imshow(f"{config.DUAL_WINDOW_NAME} | right", right_show)
-                key = cv2.waitKey(1) & 0xFF
-                if key in (27, ord("q")):
-                    logger.info("Exit requested.")
-                    break
+                if visual_mode:
+                    scale = float(getattr(config, "DUAL_SHOW_SCALE", 1.0))
+                    if scale != 1.0:
+                        left_show = cv2.resize(left_display, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                        right_show = cv2.resize(right_display, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                    else:
+                        left_show = left_display
+                        right_show = right_display
+                    cv2.imshow(f"{config.DUAL_WINDOW_NAME} | left", left_show)
+                    cv2.imshow(f"{config.DUAL_WINDOW_NAME} | right", right_show)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key in (27, ord("q")):
+                        logger.info("Exit requested.")
+                        break
+            profiler.observe("display", (time.perf_counter() - display_start) * 1000.0)
 
             if pair_index % max(1, int(getattr(config, "DUAL_LOG_EVERY_N_PAIRS", 30))) == 0:
                 logger.info(
@@ -1238,6 +1471,9 @@ def main() -> None:
                             right.source.dropped_total,
                         ],
                     )
+
+            if profiler.enabled and pair_index % profile_log_every == 0:
+                logger.info("stage_profile pair=%d %s", pair_index, profiler.format_snapshot())
 
             for runtime in runtimes:
                 if runtime.last_error is not None:

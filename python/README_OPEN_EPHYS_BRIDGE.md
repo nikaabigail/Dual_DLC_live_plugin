@@ -9,6 +9,7 @@ DUAL_OE_BRIDGE_PACKET_MODE = "pose"
 DUAL_OE_BRIDGE_WIRE_FORMAT = "binary"
 DUAL_FAST_POSE_ONLY = True
 DUAL_ENABLE_BATCH_INFERENCE = True
+DUAL_ENABLE_STAGE_PROFILER = True
 ```
 
 Python sends compact binary pose packets with raw pose points and metadata.
@@ -17,6 +18,64 @@ lines itself. Python no longer has to send `ttl_lines` or compute angles in the
 default mode. If binary transport is not desired, set
 `DUAL_OE_BRIDGE_WIRE_FORMAT = "json"`; the payload then uses
 `dual_dlc_live.pose.v1`.
+
+## Current Fast Path
+
+In binary fast mode the Python result object stores selected pose points as a
+small NumPy array:
+
+```text
+raw_pose_array.shape == (6, 3)
+columns = x, y, likelihood
+rows = DUAL_USE_POINTS order
+```
+
+The UDP binary packet is packed directly from this array. No `raw_points`
+dictionary is built for binary send. `raw_points` is created lazily only when:
+
+- `DUAL_OE_BRIDGE_WIRE_FORMAT = "json"` is used;
+- the local OpenCV overlay needs point dictionaries for drawing.
+
+This keeps the normal stimulation path as:
+
+```text
+camera frame -> DLCLive pose ndarray -> raw_pose_array -> binary UDP -> C++ plugin -> TTL
+```
+
+## Stage Profiler
+
+The profiler is enabled by default:
+
+```python
+DUAL_ENABLE_STAGE_PROFILER = True
+DUAL_PROFILE_LOG_EVERY_N_PAIRS = 120
+DUAL_PROFILE_EMA_ALPHA = 0.10
+```
+
+It writes rolling stage timings to `dual_rt_dlc_live_debug.log`:
+
+```text
+stage_profile pair=120 last_ms camera/read=0.42 preprocess=1.30 inference=8.70 pack/send=0.06 display=3.10 | avg_ms camera/read=...
+```
+
+Stages:
+
+| Stage | Meaning |
+| --- | --- |
+| `camera/read` | Successful Galaxy SDK frame reads in reader threads. |
+| `preprocess` | DLCLive `process_frame` for both cameras in the pair. |
+| `inference` | Runner/model path for both cameras in the pair. |
+| `pack/send` | Binary or JSON packet build plus UDP socket send. |
+| `display` | Local overlay, text, resize, video writer and `imshow`. |
+
+Notes:
+
+- The profiler is CPU-side wall time. GPU kernels may be asynchronous, so use it
+  mainly to find Python/CPU overhead.
+- If `DUAL_DISPLAY_WINDOW = False` and `DUAL_SAVE_OUTPUT_VIDEO = False`, overlay
+  work is skipped and `display` should be near zero.
+- `camera/read` is measured per successful camera read call, while `preprocess`
+  and `inference` are measured per processed left/right pair.
 
 Synthetic test without cameras:
 

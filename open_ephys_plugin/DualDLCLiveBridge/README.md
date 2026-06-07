@@ -38,6 +38,12 @@ Important current behavior:
 - `angle_trigger_enabled` and `angle_threshold_deg` in the plugin UI control
   lines `2` and `3`.
 - Python `DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG` is only for legacy `ttl` mode.
+- In Python binary fast mode, points are packed directly from a compact
+  `raw_pose_array` NumPy array; `raw_points` dictionaries are only built for JSON
+  fallback or local Python overlay.
+- Python stage profiler lines named `stage_profile` show camera/read,
+  preprocess, inference, pack/send and display timing before packets reach this
+  plugin.
 
 Этот документ описывает, как запускать связку:
 

@@ -17,11 +17,48 @@ Optimized defaults:
 DUAL_FAST_POSE_ONLY = True
 DUAL_ENABLE_BATCH_INFERENCE = True
 DUAL_BATCH_FALLBACK_TO_SEQUENTIAL = True
+DUAL_ENABLE_STAGE_PROFILER = True
 ```
 
 With `DUAL_FAST_POSE_ONLY = True`, Python does not compute filters, triplets or
 angles for the Open Ephys path. The plugin is the source of truth for angles
 and TTL.
+
+In binary fast mode Python stores the selected DLC points as one compact
+`float32` NumPy array with shape `[6, 3]` in `DUAL_USE_POINTS` order:
+
+```text
+[x, y, likelihood]
+```
+
+The binary UDP packet is packed directly from this array. Python does not build
+a `raw_points` dictionary for binary send. The dictionary is created lazily only
+when JSON fallback is used or when the local OpenCV overlay needs point labels.
+
+Stage profiler logs are enabled by default:
+
+```python
+DUAL_ENABLE_STAGE_PROFILER = True
+DUAL_PROFILE_LOG_EVERY_N_PAIRS = 120
+DUAL_PROFILE_EMA_ALPHA = 0.10
+```
+
+The log line looks like:
+
+```text
+stage_profile pair=120 last_ms camera/read=... preprocess=... inference=... pack/send=... display=... | avg_ms ...
+```
+
+Stages:
+
+- `camera/read`: successful Galaxy SDK frame reads in the camera reader threads;
+- `preprocess`: DLCLive `process_frame` for the current pair;
+- `inference`: runner/model inference path for the current pair;
+- `pack/send`: UDP packet packing plus socket send;
+- `display`: local overlay, resize, video writer and `imshow`.
+
+If both `DUAL_DISPLAY_WINDOW = False` and `DUAL_SAVE_OUTPUT_VIDEO = False`,
+overlay work is skipped and `display` should stay near zero.
 
 `Dual DLCLive Bridge` computes inside the Open Ephys plugin:
 
