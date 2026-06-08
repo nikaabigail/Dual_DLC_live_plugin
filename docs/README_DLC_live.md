@@ -1,13 +1,13 @@
-# Single-Camera DLCLive Runtime Reference
+# Однокамерный DLCLive runtime
 
-This document covers the older single-camera runtime:
+Этот файл описывает старый runtime для одной камеры:
 
 ```text
 rt_dlc_live.py
 config_rt_dlc_live.py
 ```
 
-The production dual-camera Open Ephys path uses:
+Рабочая система с двумя камерами и Open Ephys сейчас использует:
 
 ```text
 dual_rt_dlc_live.py
@@ -15,67 +15,69 @@ config_dual_rt_dlc_live.py
 Dual DLCLive Bridge
 ```
 
-Use this document for single-camera debugging, model checks, offline video
-testing or as a reference for shared DLCLive settings.
+Однокамерный runtime полезен для проверки модели, Galaxy SDK, offline video и
+отладки Python-side обработки без Open Ephys.
 
-## Navigation
+## Навигация
 
-| Section | Use it for |
+| Раздел | Для чего нужен |
 | --- | --- |
-| Role | What the single-camera runtime does. |
-| Configuration | Main settings in `config_rt_dlc_live.py`. |
-| Camera and Video Sources | Galaxy, OpenCV and file input. |
-| DLCLive Model | Model path, GPU and preprocessing. |
-| Online Processor | Python-side filter and angle logic. |
-| Running | How to start the runtime. |
-| Logs and CSV | Output files and diagnostics. |
-| Troubleshooting | Common single-camera issues. |
+| Роль однокамерного runtime | Что делает `rt_dlc_live.py`. |
+| Конфиг | Главные настройки `config_rt_dlc_live.py`. |
+| Источник кадров | Galaxy camera, резервный OpenCV-режим или video file. |
+| Модель DLCLive | Путь к модели, GPU, preprocessing. |
+| Python-процессор | Фильтр, точки и угол в однокамерном режиме. |
+| Порядок выполнения | От кадра до overlay/log/video. |
+| Запуск | Команды запуска. |
+| Логи | Где смотреть результат. |
+| Связь с dual runtime | Какие настройки общие. |
 
-## Role
+## Роль однокамерного runtime
 
-`rt_dlc_live.py` is a DLCLive-based realtime pipeline for one camera or one
-video file.
+`rt_dlc_live.py` - это realtime pipeline для одной камеры или одного видеофайла.
 
-It handles:
+Он делает:
 
-- frame source I/O;
-- DLCLive model setup;
-- optional Galaxy SDK camera config import;
-- Python-side online filtering;
-- hind-angle calculation;
-- OpenCV overlay;
-- benchmark CSV and output video.
+- открывает frame source;
+- строит DLCLive object;
+- запускает `init_inference`/`get_pose`;
+- применяет Python-side online processor;
+- считает hind angle в Python;
+- рисует OpenCV overlay;
+- пишет benchmark CSV;
+- при необходимости сохраняет output video.
 
-Unlike the production dual Open Ephys path, this single-camera runtime computes
-its own filtered points and angle in Python.
+В отличие от рабочего dual path, здесь Python сам считает filtered points и
+angle. В dual рабочем path это перенесено в C++ plugin Open Ephys.
 
-## Configuration File
+## Конфиг
 
-Main config:
+Основной файл:
 
 ```text
 python/config_rt_dlc_live.py
 ```
 
-The dual config imports this file and overrides selected values:
+Dual config импортирует его:
 
 ```python
 from config_rt_dlc_live import *
 ```
 
-Changing shared settings in `config_rt_dlc_live.py` can affect both single and
-dual runtimes unless the dual config overrides them.
+Поэтому изменения в `config_rt_dlc_live.py` могут затронуть и single-camera, и
+dual-camera runtime, если `config_dual_rt_dlc_live.py` не переопределяет
+конкретный параметр.
 
-## Camera and Video Sources
+## Источник кадров
 
-Choose source:
+Выбор источника:
 
 ```python
 USE_VIDEO_FILE = False
-CAMERA_BACKEND = "galaxy"  # "galaxy" or "opencv"
+CAMERA_BACKEND = "galaxy"  # "galaxy" или "opencv"
 ```
 
-Video-file settings:
+Видео файл:
 
 ```python
 VIDEO_FILE_PATH = r"C:\dlc\videos\..."
@@ -83,7 +85,7 @@ VIDEO_TARGET_FPS = 0.0
 VIDEO_SKIP_IF_BEHIND = False
 ```
 
-OpenCV fallback:
+Резервный OpenCV-режим:
 
 ```python
 CAM_INDEX = 1
@@ -92,20 +94,17 @@ FRAME_H = 1080
 TARGET_VIDEO_FPS = 100.0
 ```
 
-Galaxy source:
+Galaxy camera:
 
 ```python
-GALAXY_SDK_ROOT = Path(r"C:\Program Files\Daheng Imaging\GalaxySDK")
 GALAXY_SN = "FDE22070173"
 GALAXY_INDEX = 1
-GALAXY_CONFIG_PATH = Path(r"C:\config_daheng\Rat_TREDMILL_Top_1920px_340px_100Hz_(FDE22070173).txt")
+GALAXY_CONFIG_PATH = r"C:\config_daheng\Rat_TREDMILL_Top_1920px_340px_100Hz_(FDE22070173).txt"
 GALAXY_IMPORT_CONFIG = True
 GALAXY_CONFIG_VERIFY = False
-GALAXY_FALLBACK_APPLY_CONFIG = True
-GALAXY_FRAME_TIMEOUT_MS = 1000
 ```
 
-Low-latency Galaxy behavior:
+Low-latency:
 
 ```python
 GALAXY_LOW_LATENCY = True
@@ -115,15 +114,12 @@ GALAXY_DRAIN_QUEUED_FRAMES = True
 GALAXY_MAX_DRAIN_FRAMES = 20
 ```
 
-For live behavior, stale frames are intentionally dropped. For offline video
-analysis, keep `VIDEO_SKIP_IF_BEHIND = False` to preserve the timeline.
+## Модель DLCLive
 
-## DLCLive Model
-
-Model settings:
+Параметры:
 
 ```python
-MODEL_PATH = r"C:\dlc\project\r_tm_side-og-2024-10-25\exported-models-pytorch\..."
+MODEL_PATH = r"C:\dlc\project\r_tm_side-og-2024-10-25\exported-models-pytorch\...\snapshot-best-380.pt"
 MODEL_TYPE = "pytorch"
 PRECISION = "FP32"
 DEVICE = "cuda"
@@ -131,7 +127,7 @@ SINGLE_ANIMAL = True
 CONVERT_TO_RGB = True
 ```
 
-DLCLive preprocessing:
+Preprocessing DLCLive:
 
 ```python
 CROPPING = None
@@ -139,28 +135,12 @@ RESIZE = 1.0
 DYNAMIC_CROPPING = (False, 0.5, 10)
 ```
 
-`CROPPING` follows the DLCLive convention:
+Если кадр уже аппаратно обрезан камерой, `CROPPING = None` правильнее, иначе
+DLCLive может повторно обрезать уже узкую полосу.
 
-```text
-[x1, x2, y1, y2]
-```
+## Python-процессор
 
-Leave it as `None` when the camera or video is already cropped to the needed
-stripe.
-
-## Points and Online Processor
-
-Single-camera points:
-
-```python
-USE_POINTS = [
-    "hl_hip_l",
-    "hl_ankle_l",
-    "hl_toes_l",
-]
-```
-
-Processor settings:
+В single-camera runtime processor включен:
 
 ```python
 ENABLE_PROCESSOR = True
@@ -176,180 +156,216 @@ MAX_HOLD_FRAMES = 20
 MEDIAN_WINDOW = 3
 ```
 
-The processor runs after DLCLive inference. It stores the last raw and filtered
-pose arrays and is used by the overlay, angle calculation and CSV output.
-
-## Overlay and Angle
-
-Display settings:
+Точки:
 
 ```python
-WINDOW_NAME = "DLC Live realtime"
-DISPLAY_WINDOW = True
-SHOW_SCALE = 0.8
+USE_POINTS = [
+    "hl_hip_l",
+    "hl_ankle_l",
+    "hl_toes_l",
+]
 ```
 
-Drawing settings:
-
-```python
-DRAW_POINTS = True
-DRAW_NAMES = True
-DRAW_CONF = True
-DRAW_FPS = True
-DEBUG_OVERLAY = True
-```
-
-Angle settings:
+Угол:
 
 ```python
 COMPUTE_HIND_ANGLE = True
 HIND_ANGLE_POINTS = ("hl_hip_l", "hl_ankle_l", "hl_toes_l")
 ```
 
-## Output Files
+Здесь angle считается в Python, потому что это автономный однокамерный режим.
 
-Video output:
+## Порядок выполнения
 
-```python
-SAVE_OUTPUT_VIDEO = False
-OUTPUT_VIDEO_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_live_output.mp4")
-OUTPUT_VIDEO_FPS = 0.0
-OUTPUT_VIDEO_CODEC = "mp4v"
-```
+### 1. Источник отдает кадр
 
-Log and CSV:
+Источник может быть:
 
-```python
-LOG_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_live_debug.log")
-LOG_LEVEL = "INFO"
-LOG_EVERY_N_FRAMES = 30
+- Galaxy camera;
+- OpenCV camera;
+- video file.
 
-BENCHMARK_CSV_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\rt_dlc_live_benchmark.csv")
-ENABLE_BENCHMARK_CSV = True
-```
-
-`OUTPUT_VIDEO_FPS = 0.0` means the source FPS is used when available.
-
-## Environment Overrides
-
-Supported environment variables:
+На выходе получается:
 
 ```text
-DLC_LIVE_VIDEO_PATH
-DLC_LIVE_MODEL_PATH
-DLC_LIVE_CAMERA_BACKEND
-DLC_LIVE_GALAXY_SDK_ROOT
-DLC_LIVE_GALAXY_SN
-DLC_LIVE_GALAXY_INDEX
-DLC_LIVE_GALAXY_CONFIG_PATH
+frame
+frame_id
+capture_ts
+source metadata
 ```
 
-These are useful for quick tests without editing the config file.
+### 2. DLCLive preprocessing
 
-## Running
+Кадр проходит:
 
-Activate environment:
-
-```powershell
-& C:\dlc_live_env\Scripts\Activate.ps1
+```text
+convert to RGB, если CONVERT_TO_RGB=True
+cropping, если CROPPING задан
+resize, если RESIZE != 1.0
+dynamic cropping, если включен
 ```
 
-Run from the project directory:
+### 3. DLCLive inference
 
-```powershell
-cd C:\dlc\DLC_OBS_Spinal_cord_stimulation
-python rt_dlc_live.py
+Первый кадр:
+
+```text
+dlc_live.init_inference(frame)
 ```
 
-Or run directly:
+Следующие кадры:
+
+```text
+dlc_live.get_pose(frame)
+```
+
+Результат - pose array в порядке bodyparts модели.
+
+### 4. Online processor
+
+Processor берет pose:
+
+```text
+raw pose
+  -> confidence cutoff
+  -> despike
+  -> median smoothing
+  -> optional hold
+  -> filtered pose
+```
+
+### 5. Triplet и angle
+
+Из filtered pose выбираются:
+
+```text
+hl_hip_l
+hl_ankle_l
+hl_toes_l
+```
+
+Если все точки валидны, считается hind angle в ankle.
+
+### 6. Overlay, log и video
+
+Runtime рисует:
+
+- точки;
+- имена точек;
+- confidence;
+- FPS;
+- angle;
+- debug text.
+
+Затем пишет log/CSV/video, если это включено.
+
+## Запуск
+
+Из live-папки:
 
 ```powershell
 cd C:\dlc\DLC_OBS_Spinal_cord_stimulation
 C:\dlc_live_env\Scripts\python.exe rt_dlc_live.py
 ```
 
-## Expected Runtime Signals
-
-The log should show:
-
-- selected frame source;
-- camera or video open success;
-- DLCLive/model initialization;
-- bodypart extraction;
-- frame/inference FPS;
-- visible point count;
-- hind angle when valid.
-
-## Troubleshooting
-
-### DLCLive import fails with `colorcet`
-
-Install the missing dependency in the active environment:
-
-```powershell
-C:\dlc_live_env\Scripts\python.exe -m pip install colorcet
-```
-
-### Camera does not open
-
-Check:
-
-- GalaxyView is closed;
-- the serial number or camera index is correct;
-- Galaxy SDK path exists;
-- config file exists;
-- camera is not held by another process.
-
-### GPU is not used
-
-Check:
-
-- `DEVICE = "cuda"`;
-- PyTorch in `C:\dlc_live_env` has CUDA support;
-- the exported model is PyTorch;
-- startup log reports CUDA available.
-
-### Overlay is slow
-
-Disable drawing features:
+Для проверки видеофайла поставить:
 
 ```python
-DRAW_NAMES = False
-DRAW_CONF = False
-DEBUG_OVERLAY = False
+USE_VIDEO_FILE = True
+VIDEO_FILE_PATH = r"C:\path\to\video.avi"
 ```
 
-Or disable display:
+## Ожидаемые признаки работы
+
+В логе:
+
+```text
+Model bodyparts loaded: ...
+frame=...
+infer_ms=...
+angle=...
+```
+
+В окне OpenCV:
+
+- виден кадр;
+- поверх кадра рисуются точки;
+- FPS/angle обновляются.
+
+Если мыши нет или модель не видит точки, angle будет `None`, а triplet будет
+невалиден. Это нормально для пустого кадра.
+
+## Логи и output-файлы
+
+| Файл | Назначение |
+| --- | --- |
+| `rt_dlc_live_debug.log` | Основной log single-camera runtime. |
+| `rt_dlc_live_benchmark.csv` | Benchmark CSV, если включен. |
+| `rt_dlc_live_output.mp4` | Output video, если `SAVE_OUTPUT_VIDEO=True`. |
+
+## Связь с dual runtime
+
+Dual runtime импортирует `config_rt_dlc_live.py`, но переопределяет важные вещи:
+
+| Параметр | Single-camera | Dual рабочий режим |
+| --- | --- | --- |
+| Камеры | Одна камера или video file. | Две Daheng камеры. |
+| ROI | Может быть software cropping. | ROI уже в Galaxy `.txt`, `CROPPING=None`. |
+| Processor | Python-side filter/angle. | C++ plugin filter/angle/TTL. |
+| UDP | Нет рабочего UDP. | UDP `DDLP` на Open Ephys. |
+| TTL | Нет Open Ephys TTL. | `Dual DLCLive TTL` в plugin. |
+
+Если нужно проверить только модель или одну камеру, используй `rt_dlc_live.py`.
+Если нужно проверить stimulation path, используй `dual_rt_dlc_live.py` и Open
+Ephys plugin.
+
+## Устранение проблем
+
+### DLCLive import падает из-за `colorcet`
+
+Установить dependency в активную среду `C:\dlc_live_env`.
+
+### Камера не открывается
+
+Проверить:
+
+- GalaxyView закрыт;
+- serial number правильный;
+- Galaxy SDK видит камеру;
+- `.txt` config существует;
+- камера не занята другим процессом.
+
+### GPU не используется
+
+Проверить:
+
+```python
+DEVICE = "cuda"
+MODEL_TYPE = "pytorch"
+```
+
+И в логах/диагностике:
+
+```text
+torch.cuda.is_available() == True
+```
+
+### Overlay тормозит
+
+Для чистой проверки inference выключить:
 
 ```python
 DISPLAY_WINDOW = False
+SAVE_OUTPUT_VIDEO = False
 ```
 
-### Offline video timeline changes
+### Offline video идет не в том темпе
 
-For offline/export workflows:
+Проверить:
 
 ```python
-VIDEO_SKIP_IF_BEHIND = False
+VIDEO_TARGET_FPS
+VIDEO_SKIP_IF_BEHIND
 ```
 
-Enable frame skipping only when low visual latency matters more than preserving
-every video frame.
-
-## Relation to the Dual Runtime
-
-Use `rt_dlc_live.py` for:
-
-- single-camera debugging;
-- checking model loading;
-- checking DLCLive preprocessing;
-- testing overlay and filtering;
-- offline/video-file experiments.
-
-Use `dual_rt_dlc_live.py` for:
-
-- two-camera live experiments;
-- Open Ephys bridge integration;
-- production stimulation path;
-- binary UDP pose transport;
-- plugin-side TTL generation.
+Для анализа записи обычно лучше не пропускать кадры, чтобы не ломать timeline.

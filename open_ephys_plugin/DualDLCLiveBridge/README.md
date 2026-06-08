@@ -1,51 +1,63 @@
-# Dual DLCLive Bridge for Open Ephys
+# Dual DLCLive Bridge для Open Ephys
 
-`Dual DLCLive Bridge` is an Open Ephys processor that receives dual-camera
-DLCLive pose packets over UDP and emits Open Ephys TTL state changes.
+`Dual DLCLive Bridge` - это C++-процессор для Open Ephys. Он принимает
+UDP-пакеты от `dual_rt_dlc_live.py`, берет сырые точки позы DLCLive и превращает
+их в изменения TTL-состояний Open Ephys.
 
-The plugin does not open cameras and does not run DLCLive. Cameras and neural
-network inference are handled by Python:
+Плагин не открывает камеры и не запускает нейросеть. Камеры и DLCLive находятся
+на стороне Python.
 
 ```text
-dual_rt_dlc_live.py -> UDP 127.0.0.1:47000 -> Dual DLCLive Bridge -> Dual DLCLive TTL
+dual_rt_dlc_live.py
+  -> UDP 127.0.0.1:47000
+  -> Dual DLCLive Bridge
+  -> event channel "Dual DLCLive TTL"
+  -> следующий processor стимуляции/output
 ```
 
-## Navigation
+## Навигация
 
-| Section | Use it for |
+| Раздел | Для чего нужен |
 | --- | --- |
-| Current Role | What the plugin owns in production. |
-| UI Parameters | Every Open Ephys parameter and default. |
-| TTL Lines | Output line mapping and stimulation use. |
-| Packet Formats | Binary, JSON pose and legacy TTL input. |
-| Filtering and Angle Logic | How raw points become valid triplets and triggers. |
-| Status Line | How to read plugin UI status. |
-| Build and Install | Rebuild and smoke-test the DLL. |
-| Diagnostics | UDP test, ACK and common failures. |
+| Роль плагина | Что именно перенесено из Python в C++. |
+| Установка | Где лежит plugin source и DLL. |
+| UI параметры | Все параметры плагина и их смысл. |
+| Входные UDP форматы | Binary `DDLP`, JSON pose, legacy TTL. |
+| Порядок обработки | От UDP datagram до TTL event. |
+| TTL lines | Какая линия что значит. |
+| ACK | Как проверить, что плагин реально получил пакет. |
+| Строка статуса | Как читать строку статуса в GUI. |
+| Сборка | Как пересобрать DLL. |
+| Диагностика | Synthetic tests и типичные проблемы. |
 
-## Current Role
+## Роль плагина
 
-In production `pose` mode, Python sends raw pose points and metadata. The plugin
-computes:
+В рабочем режиме Python отправляет только сырые точки позы. Плагин сам делает:
 
-- online point filtering;
-- left/right triplet validity;
-- selected side/triplet score;
-- hind angle at ankle;
-- angle threshold triggers;
+- разбор UDP-пакета;
+- проверку формата пакета;
+- чтение left/right points;
+- likelihood cutoff;
+- despike rejection;
+- median smoothing;
+- optional hold последней хорошей точки;
+- выбор side triplet;
+- проверку валидности hip/ankle/toes;
+- расчет hind angle;
+- сравнение угла с threshold;
 - refractory gating;
-- TTL state word;
-- Open Ephys event-channel updates.
+- сборку TTL word;
+- отправку изменений TTL-состояний в Open Ephys.
 
-The plugin supports three input paths:
+Плагин поддерживает три входных режима:
 
-| Input | Status | Use case |
+| Вход | Статус | Когда нужен |
 | --- | --- | --- |
-| `DDLP` binary pose v1 | Production default | Lowest Python allocation overhead. |
-| JSON `dual_dlc_live.pose.v1` | Supported fallback | Debugging and custom point names. |
-| JSON `dual_dlc_live.v1` with `ttl_lines` | Legacy compatibility | Old Python-computed TTL mode. |
+| Binary `DDLP` pose v1 | Рабочий режим по умолчанию | Минимум CPU и allocations в Python. |
+| JSON `dual_dlc_live.pose.v1` | Fallback/debug | Когда нужны имена точек или custom point set. |
+| JSON `dual_dlc_live.v1` + `ttl_lines` | Legacy | Старый режим, где Python уже посчитал TTL. |
 
-## Installation Layout
+## Установка
 
 Open Ephys tree:
 
@@ -55,89 +67,99 @@ C:\Users\Владимир\Desktop\plugin-GUI-main\plugin-GUI-main
   out\build\x64-Debug\plugins\DualDLCLiveBridge.dll
 ```
 
-Repository source:
+Репозиторий:
 
 ```text
 C:\tmp\Dual_DLC_live_plugin\open_ephys_plugin\DualDLCLiveBridge
 ```
 
-The plugin folder should be included from Open Ephys `Plugins/CMakeLists.txt`:
+В `Plugins/CMakeLists.txt` должен быть подключен plugin:
 
 ```cmake
 add_subdirectory(DualDLCLiveBridge)
 ```
 
-## UI Parameters
+## UI параметры
 
-| Parameter | Default | Meaning |
+| Параметр | Default | Что делает |
 | --- | --- | --- |
-| `enabled` | `true` | Opens/closes the UDP listener. |
-| `udp_port` | `47000` | Local UDP port for Python packets. |
-| `angle_trigger_enabled` | `false` | Enables TTL lines `2` and `3`. |
-| `angle_threshold_deg` | `55.0` | Hind angle threshold for angle triggers. |
-| `conf_thresh_use` | `0.20` | Likelihood gate before filtering. |
-| `conf_thresh_draw` | `0.15` | Likelihood gate for accepting a visible triplet. |
-| `use_filter` | `true` | Enables the online point filter. |
-| `enable_pcutoff` | `true` | Drops points below `conf_thresh_use`. |
-| `enable_despike` | `true` | Rejects sudden implausible point jumps. |
-| `despike_threshold_px` | `150.0` | Maximum accepted point jump before rejection. |
-| `despike_reset_gap_frames` | `15` | Frame gap after which reacquisition is allowed. |
-| `median_window` | `3` | Median smoothing window in frames. |
-| `enable_hold` | `false` | Holds the last good point for short dropouts. |
-| `max_hold_frames` | `20` | Maximum frames to hold the last good point. |
-| `refractory_ms` | `0` | Minimum delay between angle-trigger rising edges. |
+| `enabled` | `true` | Включает UDP listener. Если `false`, пакеты не принимаются. |
+| `udp_port` | `47000` | Локальный UDP port, куда Python отправляет пакеты. |
+| `angle_trigger_enabled` | `false` | Разрешает TTL lines `2` и `3` для angle trigger. |
+| `angle_threshold_deg` | `55.0` | Порог hind angle для trigger. |
+| `conf_thresh_use` | `0.20` | Порог likelihood до фильтрации. |
+| `conf_thresh_draw` | `0.15` | Порог likelihood для валидного triplet. |
+| `use_filter` | `true` | Включает C++ online filter. |
+| `enable_pcutoff` | `true` | Отбрасывает точки ниже `conf_thresh_use`. |
+| `enable_despike` | `true` | Отбрасывает резкие скачки точки. |
+| `despike_threshold_px` | `150.0` | Максимальный разрешенный скачок точки. |
+| `despike_reset_gap_frames` | `15` | Через сколько кадров разрешить reacquire после пропажи. |
+| `median_window` | `3` | Размер медианного окна. |
+| `enable_hold` | `false` | Удерживать последнюю хорошую точку при короткой пропаже. |
+| `max_hold_frames` | `20` | Сколько кадров можно удерживать точку. |
+| `refractory_ms` | `0` | Минимальный интервал между rising edges angle trigger. |
 
-Production note: `angle_trigger_enabled` is disabled by default. Enable it in
-the UI when lines `2` and `3` should drive stimulation.
-
-## TTL Lines
-
-The plugin emits one Open Ephys event channel:
+Для стимуляции по углу нужно явно включить:
 
 ```text
-Dual DLCLive TTL
+angle_trigger_enabled = true
 ```
 
-Line mapping:
+Без этого lines `2` и `3` не будут активироваться.
 
-| Line | Meaning | Typical downstream use |
-| --- | --- | --- |
-| `0` | Left valid selected hip/ankle/toes triplet. | Quality gate. |
-| `1` | Right valid selected hip/ankle/toes triplet. | Quality gate. |
-| `2` | Left angle trigger. | Left stimulation rising edge. |
-| `3` | Right angle trigger. | Right stimulation rising edge. |
-| `4..7` | Reserved. | Future conditions. |
+## Входные UDP форматы
 
-Angle trigger condition:
+### Binary pose `DDLP` v1
+
+Это рабочий формат.
+
+На стороне Python:
+
+```python
+DUAL_OE_BRIDGE_PACKET_MODE = "pose"
+DUAL_OE_BRIDGE_WIRE_FORMAT = "binary"
+```
+
+Пакет начинается с:
 
 ```text
-angle_trigger_enabled
-and side has a valid triplet
-and angle_deg <= angle_threshold_deg
-and refractory_ms allows a new rising edge
+magic = "DDLP"
+version = 1
 ```
 
-The current TTL word is a bit mask:
+Высокоуровневая структура:
 
 ```text
-line0 -> 0x01
-line1 -> 0x02
-line2 -> 0x04
-line3 -> 0x08
+packet header
+  magic
+  version
+  flags
+  pair_index
+  host_time
+  host_dt_ms
+  camera_dt_ms
+  point_count
+
+left side block
+  frame_id
+  source_frame_id
+  capture_ts
+  infer_ms
+  drops
+  raw_visible
+  6 points: x, y, likelihood
+
+right side block
+  frame_id
+  source_frame_id
+  capture_ts
+  infer_ms
+  drops
+  raw_visible
+  6 points: x, y, likelihood
 ```
 
-Examples:
-
-| Active lines | TTL word |
-| --- | --- |
-| none | `0x00` |
-| `0`, `1` | `0x03` |
-| `0`, `1`, `2` | `0x07` |
-| `1`, `3` | `0x0A` |
-
-## Filtering and Angle Logic
-
-For each side, the plugin receives six raw points:
+Порядок точек фиксированный:
 
 ```text
 hl_ankle_l
@@ -148,132 +170,266 @@ hl_toes_l
 hl_toes_r
 ```
 
-Default triplets:
+Binary packet не передает имена точек. Плагин знает этот порядок заранее и
+раскладывает значения в `PosePointMap`.
 
-```text
-left:  hl_hip_l, hl_ankle_l, hl_toes_l
-right: hl_hip_r, hl_ankle_r, hl_toes_r
-```
+### JSON pose `dual_dlc_live.pose.v1`
 
-Processing order:
-
-1. Read raw points from binary or JSON input.
-2. Apply likelihood cutoff if `enable_pcutoff = true`.
-3. Apply despike rejection if enabled.
-4. Apply median smoothing over `median_window`.
-5. Optionally hold last good point when `enable_hold = true`.
-6. Score left/right triplets by visible point count and likelihood sum.
-7. Pick the better triplet.
-8. Accept the triplet if hip, ankle and toes pass `conf_thresh_draw`.
-9. Compute angle at ankle.
-10. Emit TTL validity and optional angle trigger lines.
-
-The angle is computed at the ankle from:
-
-```text
-hip -> ankle -> toes
-```
-
-## Packet Formats
-
-### Binary Pose: `DDLP` v1
-
-Production default:
-
-```python
-DUAL_OE_BRIDGE_PACKET_MODE = "pose"
-DUAL_OE_BRIDGE_WIRE_FORMAT = "binary"
-```
-
-Properties:
-
-```text
-magic: DDLP
-version: 1
-endianness: little-endian
-point order: fixed six-point DUAL_USE_POINTS order
-```
-
-High-level layout:
-
-```text
-packet header
-left frame metadata
-left 6 * [x, y, likelihood] float32
-right frame metadata
-right 6 * [x, y, likelihood] float32
-```
-
-Binary mode is compact and avoids Python `raw_points` dictionary creation. Use
-JSON if point names or point count need to change.
-
-### JSON Pose: `dual_dlc_live.pose.v1`
-
-Supported fallback:
+Fallback режим:
 
 ```python
 DUAL_OE_BRIDGE_PACKET_MODE = "pose"
 DUAL_OE_BRIDGE_WIRE_FORMAT = "json"
 ```
 
-JSON pose packets carry explicit point names:
+JSON несет имена точек явно:
 
 ```json
 {
   "schema": "dual_dlc_live.pose.v1",
-  "pair_index": 123,
+  "pair_index": 12,
   "tracked_points": ["hl_ankle_l", "..."],
-  "side_point_sets": {
-    "left": ["hl_hip_l", "hl_ankle_l", "hl_toes_l"],
-    "right": ["hl_hip_r", "hl_ankle_r", "hl_toes_r"]
-  },
   "left": {
-    "frame_id": 123,
+    "frame_id": 101,
     "raw_points": {
-      "hl_hip_l": {"x": 1.0, "y": 2.0, "likelihood": 0.9}
+      "hl_hip_l": {"x": 100.0, "y": 50.0, "likelihood": 0.9}
     }
   },
-  "right": {}
+  "right": {
+    "frame_id": 102,
+    "raw_points": {}
+  }
 }
 ```
 
-Use JSON pose when debugging or when custom point names are needed.
+Этот режим медленнее binary, но удобнее для custom point names.
 
-### Legacy TTL: `dual_dlc_live.v1`
+### Legacy TTL `dual_dlc_live.v1`
 
-Legacy mode:
+Legacy режим:
 
 ```python
 DUAL_OE_BRIDGE_PACKET_MODE = "ttl"
 ```
 
-Python computes `ttl_lines` and the plugin forwards those states:
+Python сам считает TTL states:
 
 ```json
 {
   "schema": "dual_dlc_live.v1",
-  "pair_index": 123,
+  "pair_index": 12,
   "ttl_lines": [true, true, false, false, false, false, false, false]
 }
 ```
 
-This mode remains for compatibility. It is not the production path.
+Плагин в этом режиме не считает angle/triplet по точкам, а переносит готовые
+`ttl_lines` в Open Ephys. Текущий рабочий path сейчас не такой.
 
-## ACK Behavior
+## Порядок обработки внутри плагина
 
-Normal live Python does not request ACK:
+### 1. Socket listener
 
-```python
-DUAL_OE_BRIDGE_REQUEST_ACK = False
+Когда `enabled = true`, `ensureSocket()` открывает UDP socket на `udp_port`.
+
+В отдельном thread `run()` плагин читает datagrams. Каждый datagram передается в:
+
+```text
+applyDatagram(data, numBytes, ackMessage)
 ```
 
-The synthetic sender can request ACK:
+### 2. Выбор parser path
 
-```powershell
-python send_dual_dlc_bridge_test.py --wait-ack
+`applyDatagram` смотрит первые байты:
+
+```text
+если data[0:4] == "DDLP"
+  -> applyBinaryPosePacket(...)
+иначе
+  -> String::fromUTF8(...)
+  -> applyMessage(JSON)
 ```
 
-ACK examples:
+Для JSON:
+
+```text
+schema empty или "dual_dlc_live.v1"
+  -> applyTtlMessage(...)
+schema "dual_dlc_live.pose.v1"
+  -> applyPoseMessage(...)
+```
+
+### 3. Binary packet parsing
+
+`applyBinaryPosePacket` читает:
+
+- header;
+- `version`;
+- `flags`;
+- `pair_index`;
+- timing metadata;
+- `point_count`;
+- left side block;
+- right side block.
+
+Если `version != 1` или `point_count != 6`, пакет отклоняется.
+
+Для каждой стороны плагин собирает:
+
+```text
+PosePointMap
+  point name -> PosePoint(valid, x, y, likelihood)
+```
+
+Если `x`, `y` или `likelihood` не finite, точка считается невалидной.
+
+### 4. Оценка стороны
+
+Для binary и JSON pose path вызывается:
+
+```text
+evaluateSidePosePoints(...)
+```
+
+Он делает:
+
+1. Берет сырые точки стороны.
+2. Применяет `filterPoint` к каждой нужной точке.
+3. Собирает triplet `hip`, `ankle`, `toes`.
+4. Проверяет confidence.
+5. Считает score triplet.
+6. Считает hind angle, если triplet валиден.
+
+### 5. Фильтрация точки
+
+`filterPoint` работает так:
+
+1. Проверяет `valid` и finite координаты.
+2. Если `enable_pcutoff = true`, отбрасывает likelihood ниже `conf_thresh_use`.
+3. Если `enable_despike = true`, сравнивает скачок с `despike_threshold_px`.
+4. Если скачок слишком большой, но gap больше `despike_reset_gap_frames`, разрешает reacquire.
+5. Добавляет точку в median buffer.
+6. Возвращает медианную координату за `median_window`.
+7. Если точка пропала и `enable_hold = true`, временно возвращает последнюю хорошую точку до `max_hold_frames`.
+
+Если `use_filter = false`, фильтр отключается, но confidence/triplet проверка
+все равно важна для TTL.
+
+### 6. Расчет угла
+
+Для валидного triplet:
+
+```text
+hip -> ankle -> toes
+```
+
+угол считается в ankle:
+
+```text
+angle = acos(dot(hip-ankle, toes-ankle) / (norm1 * norm2))
+```
+
+Если хотя бы одна точка невалидна или вектор почти нулевой, angle не считается.
+
+### 7. Angle trigger
+
+Линия angle trigger активируется, если:
+
+```text
+angle_trigger_enabled = true
+triplet валиден
+angle_deg <= angle_threshold_deg
+refractory_ms разрешает новый rising edge
+```
+
+`refractory_ms` нужен, чтобы не давать слишком частые повторные rising edges.
+
+### 8. Сборка TTL word
+
+Плагин собирает 8-bit word:
+
+```text
+bit 0 -> line 0 -> left triplet valid
+bit 1 -> line 1 -> right triplet valid
+bit 2 -> line 2 -> left angle trigger
+bit 3 -> line 3 -> right angle trigger
+bit 4..7 reserved
+```
+
+Пример:
+
+```text
+left valid = true
+right valid = true
+left trigger = false
+right trigger = false
+TTL word = 0b00000011 = 0x03
+```
+
+### 9. Очередь TTL изменений
+
+После разбора пакета:
+
+```text
+queueTtlWord(ttlWord)
+```
+
+Если новый `ttlWord` такой же, как прошлый, он не добавляется в очередь. Если
+изменился, плагин кладет новое state word в `pendingTtlWords`.
+
+### 10. Передача в Open Ephys
+
+В audio/process callback:
+
+```text
+process(buffer)
+  -> emitPendingTtlState(buffer.getNumSamples())
+```
+
+`emitPendingTtlState` берет все pending words и для каждой TTL line вызывает:
+
+```text
+setTTLState(sampleIndex, line, nextState)
+```
+
+Так Open Ephys получает изменения event-state на channel:
+
+```text
+Dual DLCLive TTL
+```
+
+Дальше физическая стимуляция зависит от downstream Open Ephys processors/output.
+Сам `Dual DLCLive Bridge` не управляет физическим портом напрямую.
+
+## TTL lines
+
+| Line | Bit | Значение | Типичное применение |
+| --- | --- | --- | --- |
+| `0` | `0x01` | Left triplet valid. | Gate/quality сигнал. |
+| `1` | `0x02` | Right triplet valid. | Gate/quality сигнал. |
+| `2` | `0x04` | Left angle trigger. | Rising edge для левой стимуляции. |
+| `3` | `0x08` | Right angle trigger. | Rising edge для правой стимуляции. |
+| `4..7` | `0x10..0x80` | Reserved. | Будущие условия. |
+
+Если мыши нет, обычно:
+
+```text
+ttl=0x00
+left_angle=nan
+right_angle=nan
+```
+
+Это нормально: плагин работает, но точки невалидны.
+
+## ACK
+
+ACK нужен для тестов, не для обычного high-rate live режима.
+
+Python/test sender просит ACK:
+
+- binary: ставит `flags & 0x01`;
+- JSON: ставит `"ack": true` или `"request_ack": true`.
+
+Плагин отвечает:
 
 ```text
 dual_dlc_live.ack pair=5 mode=binary ttl=0x03 left_angle=135.00 right_angle=135.00
@@ -281,75 +437,76 @@ dual_dlc_live.ack pair=5 mode=pose ttl=0x03 left_angle=135.00 right_angle=135.00
 dual_dlc_live.ack pair=5 mode=ttl ttl=0x03
 ```
 
-## Status Line
+`mode=binary` значит принят `DDLP`-пакет. Это основной рабочий путь.
 
-The plugin UI status text:
+## Строка статуса в GUI
+
+В editor плагина строка выглядит примерно так:
 
 ```text
-pkts 128 | mode bin | pair 128 | ttl 0x03 | L 135.0 | R 134.8 | q 0 | age 12ms
+pkts 120 | mode bin | pair 120 | ttl 0x03 | L 135.0 | R 135.0 | q 0 | age 4ms
 ```
 
-Fields:
-
-| Field | Meaning |
+| Поле | Значение |
 | --- | --- |
-| `pkts` | Number of accepted UDP packets. |
-| `mode` | `bin`, `pose`, `ttl` or `-`. |
-| `pair` | Last Python `pair_index`. |
-| `ttl` | Current TTL bit mask. |
-| `L` | Last left angle in degrees, or `-`. |
-| `R` | Last right angle in degrees, or `-`. |
-| `q` | Pending TTL word queue length. |
-| `age` | Milliseconds since last accepted packet. |
+| `pkts` | Сколько UDP-пакетов принято. |
+| `mode` | `bin`, `pose`, `ttl` или `-`. |
+| `pair` | Последний `pair_index`. |
+| `ttl` | Последний TTL word в hex. |
+| `L` | Последний левый angle, если был. |
+| `R` | Последний правый angle, если был. |
+| `q` | Сколько TTL words ожидает emission. |
+| `age` | Сколько ms прошло с последнего пакета. |
 
-Expected production mode is `bin`.
+Если `pkts` растет, плагин получает UDP. Если `ttl` не меняется, либо точки
+невалидны, либо условия trigger не выполняются.
 
-## Build and Install
+## Сборка и установка
 
-Close Open Ephys before rebuilding. Windows can keep the DLL locked while the
-GUI is open.
-
-Build:
+Закрыть Open Ephys перед сборкой, иначе DLL может быть занята.
 
 ```powershell
 cd C:\Users\Владимир\Desktop\plugin-GUI-main\plugin-GUI-main
 cmd.exe /s /c "`"C:\Program Files\Microsoft Visual Studio\18\Insiders\Common7\Tools\VsDevCmd.bat`" -arch=x64 && cmake --build out\build\x64-Debug --target DualDLCLiveBridge --config Debug"
 ```
 
-Smoke-test exports:
+Smoke-test DLL:
 
 ```powershell
 cd C:\Users\Владимир\Desktop\plugin-GUI-main\plugin-GUI-main
-python -B Plugins\DualDLCLiveBridge\check_plugin_load.py
+C:\dlc_live_env\Scripts\python.exe -B Plugins\DualDLCLiveBridge\check_plugin_load.py
 ```
 
-Expected:
-
-```text
-PLUGIN_MAP_OK
-EXPORT_OK getLibInfo
-EXPORT_OK getPluginInfo
-PLUGIN_EXPORTS_OK
-```
-
-Repository DLL artifact:
+Если DLL нужна как artifact, она также хранится в repo:
 
 ```text
 dist/windows-x64-debug/DualDLCLiveBridge.dll
 ```
 
-## Synthetic Tests
+## Диагностика без камер
 
-Run with Open Ephys open and the bridge enabled.
+Запустить Open Ephys, добавить `Dual DLCLive Bridge`, поставить:
 
-Binary production path:
+```text
+enabled = true
+udp_port = 47000
+```
+
+Binary test:
 
 ```powershell
 cd C:\dlc\DLC_OBS_Spinal_cord_stimulation
 C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --mode pose --wire-format binary --count 5 --interval 0.025 --wait-ack
 ```
 
-JSON pose fallback:
+Ожидаемо:
+
+```text
+acked 5/5
+dual_dlc_live.ack ... mode=binary ...
+```
+
+Резервный JSON pose:
 
 ```powershell
 C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --mode pose --wire-format json --count 5 --interval 0.025 --wait-ack
@@ -361,93 +518,68 @@ Legacy TTL:
 C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --mode ttl --count 5 --interval 0.025 --wait-ack
 ```
 
-Expected ending:
+## Диагностика с камерами
+
+В live log хорошо, если есть:
 
 ```text
-acked 5/5
+Open Ephys bridge enabled: UDP 127.0.0.1:47000 mode=pose wire=binary
+Opened left sn=FDE22070174 ...
+Opened right sn=FDE22070175 ...
+stage_profile ... pack/send=...
 ```
 
-## Downstream Stimulation
+Для точного подтверждения приема live-пакетов можно временно включить ACK и
+прочитать ответы. В нормальной конфигурации ACK выключен, поэтому `pack/send`
+показывает отправку, а plugin UI `pkts` показывает прием.
 
-This plugin emits Open Ephys events. Physical pulses are produced by a
-downstream stimulation/output processor.
-
-Recommended downstream mapping:
-
-| Purpose | Event channel | Line | Trigger |
-| --- | --- | --- | --- |
-| Left stimulation | `Dual DLCLive TTL` | `2` | Rising edge |
-| Right stimulation | `Dual DLCLive TTL` | `3` | Rising edge |
-| Left validity gate | `Dual DLCLive TTL` | `0` | State/gate |
-| Right validity gate | `Dual DLCLive TTL` | `1` | State/gate |
-
-If you need repeated pulse trains while a condition remains true, implement the
-pulse train in the downstream stimulation processor or add a dedicated pulse
-mode to this bridge. The bridge currently emits TTL state changes.
-
-## Troubleshooting
-
-### Build fails with `LNK1168`
-
-Open Ephys is probably still holding `DualDLCLiveBridge.dll`.
-
-Fix:
-
-1. Close Open Ephys.
-2. Confirm no `open-ephys.exe` process is running.
-3. Rebuild.
+## Типичные проблемы
 
 ### `missing ack`
 
-Check:
+Причины:
 
-- Open Ephys is running.
-- The signal chain contains `Dual DLCLive Bridge`.
-- `enabled = true`.
-- `udp_port = 47000`.
-- Python sender uses the same port.
-- DLL was rebuilt after source changes.
+- Open Ephys не запущен;
+- plugin не добавлен в signal chain;
+- `enabled = false`;
+- порт не совпадает с `DUAL_OE_BRIDGE_PORT`;
+- запущен не тот Open Ephys build.
 
-### `pkts` does not increase
+### `pkts` не растет
 
-Check UDP listener:
+Проверить:
 
-```powershell
-netstat -ano -p udp | Select-String ':47000'
-```
+- Python пишет `Open Ephys bridge enabled: UDP 127.0.0.1:47000 mode=pose wire=binary`;
+- synthetic test дает `acked 5/5`;
+- firewall не блокирует local UDP;
+- в Open Ephys открыт именно этот plugin.
 
-Run the synthetic test. If synthetic test works but live Python does not, the
-problem is on the Python/camera/model side.
+### `ttl=0x00`
 
-### `ttl` never reaches lines `2` or `3`
+Это не обязательно ошибка. `0x00` нормален, если:
 
-Check:
+- мыши нет;
+- likelihood точек ниже threshold;
+- triplet невалиден;
+- `angle_trigger_enabled=false`;
+- угол выше threshold.
+
+### Lines `2` и `3` не появляются
+
+Проверить:
 
 - `angle_trigger_enabled = true`;
-- `angle_threshold_deg` is appropriate;
-- valid points are reaching lines `0` and `1`;
-- `conf_thresh_draw` is not too strict;
-- angles shown in `L` and `R` cross the threshold;
-- `refractory_ms` is not suppressing expected triggers.
+- `angle_threshold_deg` подходит под ожидаемый угол;
+- triplet lines `0`/`1` валидны;
+- `refractory_ms` не слишком большой;
+- downstream processor слушает channel `Dual DLCLive TTL`.
 
-### TTL events exist but stimulation does not fire
+### TTL в plugin есть, но стимуляции нет
 
-Check downstream processor:
+Плагин создает Open Ephys event states, но физический выход делает downstream
+chain. Нужно проверить:
 
-- event channel is `Dual DLCLive TTL`;
-- trigger line is `2` or `3`;
-- trigger mode is rising edge;
-- output hardware is enabled and connected;
-- Open Ephys acquisition/processing is running.
-
-## Maintenance Checklist
-
-When changing the bridge protocol:
-
-1. Update Python sender and runtime.
-2. Update C++ parser.
-3. Update synthetic tests.
-4. Rebuild the plugin.
-5. Run `check_plugin_load.py`.
-6. Run binary, JSON and legacy synthetic UDP tests.
-7. Update root README, Python README and this plugin README.
+- acquisition/processing в Open Ephys запущены;
+- downstream output processor подключен к `Dual DLCLive TTL`;
+- нужные TTL lines выбраны downstream;
+- физический кабель/устройство стимуляции подключены.

@@ -1,39 +1,40 @@
-# Python Dual DLCLive Runbook
+# Инструкция по Python-части dual DLCLive
 
-This document describes the Python side of the dual-camera DLCLive system:
+Этот файл описывает Python-часть dual-camera системы:
 
 ```text
 dual_rt_dlc_live.py
-  -> two Daheng/Galaxy cameras
-  -> DLCLive/PyTorch pose inference
-  -> binary or JSON UDP packets
-  -> Open Ephys "Dual DLCLive Bridge"
+  -> две Daheng/Galaxy камеры
+  -> DLCLive/PyTorch inference
+  -> UDP-пакеты на 127.0.0.1:47000
+  -> плагин Open Ephys "Dual DLCLive Bridge"
 ```
 
-For Open Ephys plugin parameters and TTL behavior, see:
+Плагин Open Ephys, его параметры и TTL-логика описаны отдельно:
 
 ```text
 open_ephys_plugin/DualDLCLiveBridge/README.md
 ```
 
-## Navigation
+## Навигация
 
-| Section | Use it for |
+| Раздел | Для чего нужен |
 | --- | --- |
-| Current Runtime Contract | What Python is responsible for now. |
-| Launch Checklist | Minimal steps before a real run. |
-| Camera Configuration | Left/right serials, Galaxy configs and ROI. |
-| DLCLive Model | Model path, GPU mode and preprocessing. |
-| Open Ephys Bridge | UDP modes, binary fast path and JSON fallback. |
-| Stage Profiler | Where latency and CPU time are measured. |
-| Running Tests Without Cameras | Synthetic packet checks. |
-| Running With Cameras | Actual experiment startup order. |
-| Logs and Diagnostics | What to inspect while debugging. |
-| Troubleshooting | Common failures and fixes. |
+| Роль Python | Что Python делает сейчас, а что перенесено в C++ plugin. |
+| Файлы и конфиги | Где лежит runtime и какие файлы важны. |
+| Камеры | Serial numbers, Galaxy configs, ROI, low-latency режим. |
+| Модель DLCLive | Откуда берется модель, как проверяется GPU. |
+| Порядок выполнения | Дотошный путь данных внутри `dual_rt_dlc_live.py`. |
+| UDP bridge | Binary/JSON/legacy TTL режимы. |
+| Binary fast-mode | Почему не строится `raw_points` dict. |
+| Профилировщик стадий | Как понять, где тратятся миллисекунды. |
+| Запуск | Synthetic test и live-run с камерами. |
+| Логи | Какие строки искать при проверке. |
+| Устранение проблем | Частые ошибки. |
 
-## Current Runtime Contract
+## Роль Python
 
-Default production configuration:
+Текущий рабочий контракт:
 
 ```python
 DUAL_OE_BRIDGE_ENABLED = True
@@ -45,38 +46,32 @@ DUAL_BATCH_FALLBACK_TO_SEQUENTIAL = True
 DUAL_ENABLE_STAGE_PROFILER = True
 ```
 
-Python currently does:
+Python делает:
 
-- opens two Daheng/Galaxy USB3 cameras;
-- imports the Galaxy `.txt` camera configs;
-- keeps low-latency camera buffers by dropping stale frames;
-- pairs latest left/right frames;
-- runs DLCLive/PyTorch inference;
-- sends raw pose points plus metadata to Open Ephys over UDP;
-- optionally shows a local OpenCV diagnostic overlay;
-- logs stage timings for performance diagnosis.
+- открывает две Daheng/Galaxy USB3 камеры;
+- импортирует `.txt` конфиги Galaxy;
+- держит low-latency поток, сбрасывая старые кадры;
+- берет последнюю пару left/right кадров;
+- запускает DLCLive/PyTorch inference;
+- выбирает шесть нужных точек позы;
+- упаковывает точки и metadata в UDP-пакет;
+- отправляет пакет в плагин Open Ephys;
+- опционально показывает OpenCV overlay;
+- пишет profiler/log строки.
 
-Python does not compute production TTL decisions in the default mode. Filtering,
-side/triplet selection, hind angle, refractory logic and TTL output are computed
-inside the Open Ephys C++ plugin.
+Python не делает в рабочем режиме:
 
-## Launch Checklist
+- не фильтрует точки для решения о стимуляции;
+- не выбирает рабочий triplet;
+- не считает рабочий hind angle;
+- не применяет refractory для стимуляции;
+- не формирует рабочие TTL lines.
 
-Before running `dual_rt_dlc_live.py`:
+Эти решения делает C++ plugin `Dual DLCLive Bridge`.
 
-1. Connect both Daheng cameras through the USB3 hub.
-2. Close GalaxyView.
-3. Start Open Ephys.
-4. Add `Dual DLCLive Bridge` to the signal chain.
-5. Set bridge `enabled = true`.
-6. Confirm `udp_port = 47000`.
-7. Run synthetic UDP test and confirm `acked 5/5`.
-8. Start Open Ephys acquisition/processing if TTL events must reach downstream processors.
-9. Start `dual_rt_dlc_live.py`.
+## Файлы и конфиги
 
-## Files
-
-Runtime directory on the experiment machine:
+Live-папка на экспериментальном компьютере:
 
 ```text
 C:\dlc\DLC_OBS_Spinal_cord_stimulation
@@ -88,22 +83,37 @@ C:\dlc\DLC_OBS_Spinal_cord_stimulation
   README_OPEN_EPHYS_BRIDGE.md
 ```
 
-Repository source:
+Репозиторий:
 
 ```text
-C:\tmp\Dual_DLC_live_plugin\python
+C:\tmp\Dual_DLC_live_plugin
 ```
 
-## Camera Configuration
+Виртуальная среда:
 
-Current dual camera mapping:
+```text
+C:\dlc_live_env\Scripts\python.exe
+```
 
-| Side | Serial | Galaxy config |
-| --- | --- | --- |
-| `left` | `FDE22070174` | `C:\config_daheng\Rat_TREDMILL_Left_1920px_220px_100Hz_(FDE22070174).txt` |
-| `right` | `FDE22070175` | `C:\config_daheng\Rat_TREDMILL_Right_1920px_220px_100Hz_(FDE22070175).txt` |
+Основной конфиг dual runtime:
 
-Configured in `config_dual_rt_dlc_live.py`:
+```text
+python/config_dual_rt_dlc_live.py
+```
+
+Он импортирует базовый single-camera config:
+
+```python
+from config_rt_dlc_live import *
+```
+
+Поэтому `MODEL_PATH`, `DEVICE`, `CONVERT_TO_RGB`, часть DLCLive-настроек и
+некоторые shared параметры берутся из `config_rt_dlc_live.py`, если dual config
+их не переопределил.
+
+## Камеры
+
+Текущий список:
 
 ```python
 DUAL_CAMERAS = [
@@ -120,16 +130,23 @@ DUAL_CAMERAS = [
 ]
 ```
 
-Camera-side ROI comes from those Galaxy config files. Python does not add a
-second software crop:
+Что делает `runtime.source.open()`:
 
-```python
-CROPPING = None
-RESIZE = 1.0
-DYNAMIC_CROPPING = (False, 0.5, 10)
-```
+1. Находит камеру по serial number.
+2. Открывает устройство через Galaxy SDK.
+3. Импортирует `.txt` конфиг, если `DUAL_IMPORT_CONFIG = True`.
+4. Если import не прошел, включает резервные настройки, если разрешено.
+5. Запускает acquisition.
+6. Читает native параметры и пишет их в лог.
 
-Low-latency camera settings:
+Ожидаемые native параметры:
+
+| Камера | Width | Height | OffsetY | FPS |
+| --- | --- | --- | --- | --- |
+| left `FDE22070174` | `1920` | `220` | `510` | `100` |
+| right `FDE22070175` | `1920` | `220` | `530` | `100` |
+
+Low-latency настройки:
 
 ```python
 DUAL_LOW_LATENCY = True
@@ -139,45 +156,49 @@ DUAL_DRAIN_QUEUED_FRAMES = True
 DUAL_MAX_DRAIN_FRAMES = 20
 ```
 
-These settings intentionally prefer fresh frames over preserving every camera
-frame. That is the correct behavior for live stimulation.
+Смысл: если pipeline не успел обработать все кадры, старые кадры выбрасываются.
+Для real-time стимуляции это правильнее, чем копить задержку.
 
-## DLCLive Model
+## Модель DLCLive
 
-`config_dual_rt_dlc_live.py` imports base model settings from
-`config_rt_dlc_live.py`.
-
-Important model settings:
+Путь берется из `config_rt_dlc_live.py`:
 
 ```python
+MODEL_PATH = r"C:\dlc\project\r_tm_side-og-2024-10-25\exported-models-pytorch\...\snapshot-best-380.pt"
 MODEL_TYPE = "pytorch"
-PRECISION = "FP32"
 DEVICE = "cuda"
+PRECISION = "FP32"
 SINGLE_ANIMAL = True
 CONVERT_TO_RGB = True
 ```
 
-The model path is configured in `config_rt_dlc_live.py`:
+При запуске лог должен показать:
 
-```python
-MODEL_PATH = r"C:\dlc\project\r_tm_side-og-2024-10-25\exported-models-pytorch\..."
+```text
+CUDA_CHECK torch=... cuda=True gpu=NVIDIA GeForce RTX 5070 Laptop GPU
+DLC_MODEL_DEVICE_AFTER_INIT = cuda:0
+Model bodyparts loaded: 15; dual points=[...]
 ```
 
-The script logs a CUDA/model device check at startup. If the model loads on CPU,
-check the active environment, PyTorch CUDA installation and `DEVICE`.
+Важно: до `init_inference` у `dlc_live.model` может быть `None`. Это нормально.
+Фактическая проверка GPU появляется после первого init.
 
-## Tracked Points
+## Порядок выполнения внутри `dual_rt_dlc_live.py`
 
-Current point groups:
+### 1. Проверка конфига
 
-```python
-DUAL_SIDE_POINT_SETS = {
-    "left": ("hl_hip_l", "hl_ankle_l", "hl_toes_l"),
-    "right": ("hl_hip_r", "hl_ankle_r", "hl_toes_r"),
-}
-```
+`validate_config()` проверяет:
 
-`DUAL_USE_POINTS` is sorted:
+- есть две камеры;
+- имена камер уникальны;
+- serial numbers заданы;
+- `DUAL_USE_POINTS` не пустой;
+- UDP port положительный;
+- `DUAL_OE_BRIDGE_PACKET_MODE` равен `pose` или `ttl`;
+- `DUAL_OE_BRIDGE_WIRE_FORMAT` равен `binary` или `json`;
+- binary mode используется только с фиксированным порядком точек.
+
+Фиксированный binary порядок:
 
 ```text
 hl_ankle_l
@@ -188,112 +209,274 @@ hl_toes_l
 hl_toes_r
 ```
 
-This fixed order is required for binary transport. If a future model uses
-different point names, switch to JSON transport:
+### 2. Создание bridge object
+
+`OpenEphysBridge(logger)` читает:
 
 ```python
-DUAL_OE_BRIDGE_WIRE_FORMAT = "json"
+DUAL_OE_BRIDGE_ENABLED
+DUAL_OE_BRIDGE_HOST
+DUAL_OE_BRIDGE_PORT
+DUAL_OE_BRIDGE_SEND_EVERY_N_RESULTS
+DUAL_OE_BRIDGE_PACKET_MODE
+DUAL_OE_BRIDGE_WIRE_FORMAT
+DUAL_OE_BRIDGE_REQUEST_ACK
 ```
 
-## Open Ephys Bridge
+Если bridge включен, `bridge.open()` создает UDP socket:
 
-Default bridge settings:
+```text
+socket.AF_INET, socket.SOCK_DGRAM
+non-blocking
+target = 127.0.0.1:47000
+```
+
+### 3. Создание runtime для камер
+
+Для каждой записи `DUAL_CAMERAS` создается `CameraRuntime`.
+
+Внутри хранится:
+
+- имя камеры: `left` или `right`;
+- serial number;
+- путь к Galaxy config;
+- объект source;
+- последний кадр;
+- счетчики FPS/drops;
+- last error.
+
+### 4. Reader threads
+
+Для каждой камеры запускается отдельный поток `reader_loop`.
+
+Он делает:
+
+```text
+source.read()
+  -> FramePacket
+  -> runtime.latest_packet = packet
+  -> runtime.latest_seq += 1
+  -> profiler.observe("camera/read", read_ms)
+```
+
+Если источник вернул ошибку, поток сохраняет `runtime.last_error`, и основной
+loop потом поднимет исключение.
+
+### 5. Первая пара
+
+`wait_for_initial_pair(left, right, stop_event)` ждет, пока у обеих камер
+появится хотя бы один кадр.
+
+Ожидаемая строка:
+
+```text
+First pair received. host_dt=... left_shape=(220, 1920, 3) right_shape=(220, 1920, 3)
+```
+
+### 6. Инициализация DLCLive
+
+Вызов:
 
 ```python
+dlc_live = live.build_dlc_live(None)
+model_cfg = dlc_live.read_config()
+body_parts = live.extract_bodyparts(model_cfg)
+```
+
+Затем код проверяет, что все точки из `DUAL_USE_POINTS` есть в exported model.
+Если какой-то точки нет, запуск останавливается с понятной ошибкой.
+
+### 7. Fast pose-only mode
+
+Если:
+
+```python
+DUAL_FAST_POSE_ONLY = True
 DUAL_OE_BRIDGE_ENABLED = True
-DUAL_OE_BRIDGE_HOST = "127.0.0.1"
-DUAL_OE_BRIDGE_PORT = 47000
-DUAL_OE_BRIDGE_SEND_EVERY_N_RESULTS = 1
 DUAL_OE_BRIDGE_PACKET_MODE = "pose"
-DUAL_OE_BRIDGE_WIRE_FORMAT = "binary"
-DUAL_OE_BRIDGE_REQUEST_ACK = False
 ```
 
-Supported modes:
+то Python-side processor отключается:
 
-| Packet mode | Wire format | Meaning |
-| --- | --- | --- |
-| `pose` | `binary` | Production default. Raw pose points are sent as `DDLP` binary packets. |
-| `pose` | `json` | Debug/custom-point fallback. Raw pose points are sent as `dual_dlc_live.pose.v1`. |
-| `ttl` | JSON | Legacy path. Python computes `ttl_lines` before sending. |
+```text
+runtime.processor = None
+```
 
-In production, keep:
+Значит Python не строит filtered pose, triplet и angle. Он только отправляет
+сырые точки.
+
+### 8. Inference thread
+
+`inference_loop` берет последние кадры:
+
+```text
+left_packet = latest left frame
+right_packet = latest right frame
+```
+
+Дальше:
+
+```text
+host_dt_ms = packet_delta_ms(left_packet, right_packet)
+camera_dt_ms = sdk_delta_ms(...)
+```
+
+Если batch поддерживается:
+
+```text
+process_frame(left)
+process_frame(right)
+torch.stack(...)
+runner.model(batch)
+postprocess two poses
+```
+
+Если batch не поддерживается:
+
+```text
+run_inference(left)
+run_inference(right)
+```
+
+На выходе создается `PairInferenceResult`:
+
+```text
+pair_index
+left_packet
+right_packet
+host_dt_ms
+camera_dt_ms
+left_result
+right_result
+```
+
+### 9. Компактный pose result
+
+В fast mode `raw_pose_result(...)` создает:
+
+```python
+{
+    "infer_ms": ...,
+    "preprocess_ms": ...,
+    "model_infer_ms": ...,
+    "raw_pose_array": np.ndarray shape (6, 3), dtype float32,
+    "raw_visible": ...,
+    "filtered_visible": raw_visible,
+    "has_triplet": False,
+    "hind_angle": None,
+    "picked_side": runtime.name,
+    "python_postprocess": False,
+}
+```
+
+Здесь `has_triplet=False` и `hind_angle=None` не означают ошибку. В fast mode
+Python специально не считает triplet/angle, потому что это делает plugin.
+
+### 10. Отправка UDP
+
+Основной loop берет свежий `PairInferenceResult` и вызывает:
+
+```python
+bridge.send(result, left, right)
+```
+
+Если выбран рабочий binary mode:
+
+```text
+_build_binary_pose_payload(...)
+  -> BINARY_HEADER_STRUCT
+  -> BINARY_SIDE_STRUCT для left
+  -> 6 * float32 points для left
+  -> BINARY_SIDE_STRUCT для right
+  -> 6 * float32 points для right
+  -> sock.sendto(data, ("127.0.0.1", 47000))
+```
+
+Если выбран резервный JSON-режим:
+
+```text
+_build_payload(...)
+  -> raw_points dict
+  -> json.dumps(...)
+  -> sock.sendto(...)
+```
+
+Если legacy TTL:
+
+```text
+_build_ttl_payload(...)
+  -> ttl_lines[0..7]
+  -> json.dumps(...)
+  -> sock.sendto(...)
+```
+
+## UDP bridge режимы
+
+| Режим пакета | Формат передачи | Что отправляет Python | Что делает plugin |
+| --- | --- | --- | --- |
+| `pose` | `binary` | `DDLP`-пакет с `[6,3]` float32 точками. | Сам считает valid/triplet/angle/TTL. |
+| `pose` | `json` | JSON `dual_dlc_live.pose.v1` с `raw_points`. | Сам считает valid/triplet/angle/TTL. |
+| `ttl` | JSON | JSON `dual_dlc_live.v1` с готовым `ttl_lines`. | Переносит готовые TTL states в Open Ephys. |
+
+Рабочий режим:
 
 ```python
 DUAL_OE_BRIDGE_PACKET_MODE = "pose"
 DUAL_OE_BRIDGE_WIRE_FORMAT = "binary"
 ```
 
-## Binary Fast Path
+## Binary packet `DDLP`
 
-In binary fast mode, Python stores selected points as:
-
-```text
-raw_pose_array.shape == (6, 3)
-raw_pose_array.dtype == float32
-columns = x, y, likelihood
-rows = DUAL_USE_POINTS order
-```
-
-Binary send packs directly from this array. It does not build:
-
-```python
-raw_points: dict[str, dict[str, float | None]]
-```
-
-`raw_points` is created only when:
-
-- JSON fallback is used;
-- local OpenCV overlay needs point dictionaries.
-
-This reduces Python allocation overhead in the normal stimulation path.
-
-## Binary Packet Summary
-
-Binary pose packets use:
+Header:
 
 ```text
-magic: DDLP
+magic: b"DDLP"
 version: 1
-byte order: little-endian
+flags: bit 0 = request ACK
+pair_index: int64
+host_time: float64
+host_dt_ms: float32
+camera_dt_ms: float32
+point_count: uint16
+reserved: uint16
 ```
 
-High-level packet structure:
+Side block для каждой камеры:
 
 ```text
-header
-left side block
-left six [x, y, likelihood] points
-right side block
-right six [x, y, likelihood] points
+frame_id: int64
+source_frame_id: int64
+capture_ts: float64
+infer_ms: float32
+drops: uint32
+raw_visible: uint16
+reserved: uint16
+points: point_count * (x float32, y float32, likelihood float32)
 ```
 
-The C++ plugin expects exactly the current six points in the configured order.
-JSON fallback should be used for custom point sets because JSON carries point
-names explicitly.
+Binary packet не несет имена точек, поэтому порядок точек должен совпадать с
+`BINARY_POSE_POINT_NAMES`.
 
-## Batch Inference
+## ACK
 
-Batch inference is enabled by default:
+`DUAL_OE_BRIDGE_REQUEST_ACK = False` по умолчанию.
 
-```python
-DUAL_ENABLE_BATCH_INFERENCE = True
-DUAL_BATCH_FALLBACK_TO_SEQUENTIAL = True
+Для тестов можно включить ACK. Тогда:
+
+- Python ставит ACK-флаг в binary packet или поле `ack=true` в JSON;
+- plugin отправляет назад текст:
+
+```text
+dual_dlc_live.ack pair=5 mode=binary ttl=0x03 left_angle=135.00 right_angle=135.00
 ```
 
-Behavior:
+Обычный live sender не читает ACK в рабочем loop, потому что это лишняя
+нагрузка. Для проверки используется `send_dual_dlc_bridge_test.py --wait-ack`
+или временный диагностический monkeypatch.
 
-- the first frame pair warms up DLCLive/model initialization;
-- after warm-up, compatible PyTorch runner paths infer left and right as one
-  mini-batch;
-- unsupported paths automatically fall back to sequential `get_pose` calls.
+## Профилировщик стадий
 
-Batch is skipped if the runner uses unsupported detector/dynamic-cropping paths.
-The fallback is intentional and should not stop an experiment.
-
-## Stage Profiler
-
-Profiler settings:
+Включение:
 
 ```python
 DUAL_ENABLE_STAGE_PROFILER = True
@@ -301,63 +484,57 @@ DUAL_PROFILE_LOG_EVERY_N_PAIRS = 120
 DUAL_PROFILE_EMA_ALPHA = 0.10
 ```
 
-Output goes to:
+Пример:
 
 ```text
-C:\dlc\DLC_OBS_Spinal_cord_stimulation\dual_rt_dlc_live_debug.log
+stage_profile pair=120 last_ms camera/read=10.23 preprocess=1.10 inference=43.93 pack/send=0.20 display=0.00 | avg_ms ...
 ```
 
-Example line:
-
-```text
-stage_profile pair=120 last_ms camera/read=0.42 preprocess=1.30 inference=8.70 pack/send=0.06 display=3.10 | avg_ms camera/read=...
-```
-
-Stage meanings:
-
-| Stage | Meaning |
+| Stage | Что входит |
 | --- | --- |
-| `camera/read` | Successful camera frame read calls in reader threads. |
-| `preprocess` | DLCLive `process_frame` for the current left/right pair. |
-| `inference` | Model/runner inference for the current left/right pair. |
-| `pack/send` | Binary or JSON packet construction and UDP socket send. |
-| `display` | Local overlay, text, resize, video writer and `imshow`. |
+| `camera/read` | Время успешного `source.read()` в reader thread. |
+| `preprocess` | DLCLive `process_frame` для пары. |
+| `inference` | PyTorch runner/model inference. |
+| `pack/send` | Упаковка UDP и `socket.sendto`. |
+| `display` | OpenCV overlay, resize, video writer, `imshow`. |
 
-Interpretation:
+Как читать:
 
-- High `camera/read`: camera SDK wait time, USB, trigger or frame timeout.
-- High `preprocess`: RGB conversion, crop/resize or CPU transform cost.
-- High `inference`: model/GPU path or GPU synchronization.
-- High `pack/send`: serialization or socket issue.
-- High `display`: OpenCV overlay/window/video writing is consuming CPU.
+- высокий `camera/read`: SDK/USB/camera timing;
+- высокий `preprocess`: CPU preprocessing, RGB conversion, resize/crop;
+- высокий `inference`: модель/GPU path;
+- высокий `pack/send`: сериализация или UDP socket;
+- высокий `display`: окно/overlay/video writer грузят CPU.
 
-For lowest CPU usage during experiments:
+Если:
 
 ```python
 DUAL_DISPLAY_WINDOW = False
 DUAL_SAVE_OUTPUT_VIDEO = False
 ```
 
-Then `display` should remain close to zero.
+то `display` должен быть около `0.00`.
 
-## Running Tests Without Cameras
+## Запуск без камер: synthetic UDP test
 
-Open Ephys must be running and `Dual DLCLive Bridge` must be enabled.
+Сначала запусти Open Ephys и добавь `Dual DLCLive Bridge`.
 
-Binary pose test:
+Рабочий binary-test:
 
 ```powershell
 cd C:\dlc\DLC_OBS_Spinal_cord_stimulation
 C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --mode pose --wire-format binary --count 5 --interval 0.025 --wait-ack
 ```
 
-Expected ending:
+Ожидаемый результат:
 
 ```text
+sent pair=1 mode=pose wire=binary ...
+ack pair=1 ... dual_dlc_live.ack pair=1 mode=binary ttl=...
 acked 5/5
 ```
 
-JSON pose fallback:
+Резервный JSON pose:
 
 ```powershell
 C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --mode pose --wire-format json --count 5 --interval 0.025 --wait-ack
@@ -369,186 +546,139 @@ Legacy TTL:
 C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --mode ttl --count 5 --interval 0.025 --wait-ack
 ```
 
-Use `--check-ack-ttl` when you want the sender to verify the returned TTL word.
-Remember that angle trigger lines `2` and `3` are disabled unless enabled in
-the plugin UI.
+## Запуск с камерами
 
-## Running With Cameras
-
-1. Close GalaxyView.
-2. Start Open Ephys.
-3. Add and enable `Dual DLCLive Bridge`.
-4. Start acquisition/processing in Open Ephys if downstream TTL processing is
-   required.
-5. Start Python:
+1. Подключить обе Daheng камеры через USB3 hub.
+2. Закрыть GalaxyView.
+3. Запустить Open Ephys.
+4. Добавить `Dual DLCLive Bridge`.
+5. Проверить `enabled = true`, `udp_port = 47000`.
+6. Запустить synthetic test и убедиться, что `acked 5/5`.
+7. Запустить Python:
 
 ```powershell
 cd C:\dlc\DLC_OBS_Spinal_cord_stimulation
 C:\dlc_live_env\Scripts\python.exe dual_rt_dlc_live.py
 ```
 
-Optional environment activation:
+## Нормальные runtime-сигналы
 
-```powershell
-& C:\dlc_live_env\Scripts\Activate.ps1
-cd C:\dlc\DLC_OBS_Spinal_cord_stimulation
-python dual_rt_dlc_live.py
-```
-
-## Expected Runtime Signals
-
-Python log should show:
-
-- both cameras opened with the expected serial numbers;
-- first frame pair received;
-- CUDA availability and GPU name;
-- bodypart count and `DUAL_USE_POINTS`;
-- periodic pair logs;
-- periodic `stage_profile` lines.
-
-Open Ephys plugin UI should show:
+В `dual_rt_dlc_live_debug.log` должны быть строки:
 
 ```text
-pkts increasing
-mode bin
-pair increasing
-ttl 0x..
-L/R angle values when valid
-q usually near 0
-age small when packets are fresh
+Open Ephys bridge enabled: UDP 127.0.0.1:47000 mode=pose wire=binary
+Opened left sn=FDE22070174 ...
+Opened right sn=FDE22070175 ...
+First pair received. host_dt=...
+CUDA_CHECK torch=... cuda=True gpu=...
+Fast pose-only mode enabled ...
+Model bodyparts loaded: 15; dual points=[...]
+stage_profile pair=...
 ```
 
-## Output for Stimulation
-
-The Python process does not directly stimulate. It sends pose packets to the
-C++ plugin. The plugin creates Open Ephys TTL events:
+Если мыши нет, ожидаемо:
 
 ```text
-Dual DLCLive TTL
+left_triplet=False
+right_triplet=False
+left_angle=None
+right_angle=None
+ttl=0x00
 ```
 
-Typical downstream setup:
+Это означает, что нет валидных точек, а не то, что UDP/plugin сломаны.
 
-| Use | Line | Trigger |
-| --- | --- | --- |
-| Left stimulation | `2` | Rising edge |
-| Right stimulation | `3` | Rising edge |
-| Left validity gate | `0` | State/gate |
-| Right validity gate | `1` | State/gate |
+## Что идет дальше на стимуляцию
 
-Set `angle_trigger_enabled` and `angle_threshold_deg` in the plugin UI, not in
-Python, for production `pose` mode.
+Python не стимулирует напрямую. Python только передает точки позы в plugin.
 
-## Logs and CSV
-
-Main log:
+Стимуляционный путь:
 
 ```text
-C:\dlc\DLC_OBS_Spinal_cord_stimulation\dual_rt_dlc_live_debug.log
+сырые точки позы
+  -> plugin фильтрует точки
+  -> plugin считает triplet validity
+  -> plugin считает hind angle
+  -> plugin формирует TTL word
+  -> Open Ephys event channel "Dual DLCLive TTL"
+  -> следующий stimulation/output processor
 ```
 
-Optional benchmark CSV:
+Настройки порога угла ставятся в UI плагина:
 
-```python
-ENABLE_BENCHMARK_CSV = True
-BENCHMARK_CSV_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\dual_rt_dlc_live_benchmark.csv")
+```text
+angle_trigger_enabled
+angle_threshold_deg
+refractory_ms
 ```
 
-CSV is disabled by default in the dual runtime because file I/O can add CPU
-overhead during live work.
+`DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG` в Python нужен только для legacy `ttl`
+mode. В рабочем `pose` mode он не является источником истины.
 
-## Display and Video
+## Логи и файлы
 
-Local OpenCV windows:
+| Файл | Назначение |
+| --- | --- |
+| `dual_rt_dlc_live_debug.log` | Основной live log, камеры, CUDA, profiler. |
+| `dual_rt_dlc_live_benchmark.csv` | CSV benchmark, если `ENABLE_BENCHMARK_CSV=True`. |
+| `dual_rt_dlc_live_left.mp4` | Видео левой камеры, если включено сохранение. |
+| `dual_rt_dlc_live_right.mp4` | Видео правой камеры, если включено сохранение. |
 
-```python
-DUAL_DISPLAY_WINDOW = True
-DUAL_SHOW_SCALE = 0.5
+## Устранение проблем
+
+### Камеры не открываются
+
+Проверь:
+
+- GalaxyView закрыт;
+- serial numbers совпадают с `DUAL_CAMERAS`;
+- hub подключен к USB3;
+- `.txt` configs существуют;
+- Galaxy SDK видит `device_count 2`;
+- `access_status = 0`.
+
+### Open Ephys не получает пакеты
+
+Проверь:
+
+- Open Ephys запущен;
+- plugin добавлен в chain;
+- `enabled = true`;
+- `udp_port = 47000`;
+- synthetic test возвращает `acked 5/5`.
+
+### GPU почти не загружен
+
+Сначала смотри profiler:
+
+- если высокие `preprocess` или `display`, bottleneck на CPU;
+- если высокий `inference`, но GPU низкий, возможно модель/runner синхронизируется или batch path неэффективен;
+- если `camera/read` около 10 ms, это нормально для 100 Hz камеры.
+
+### Нет TTL при пустой дорожке
+
+Это нормально. Без мыши нет валидных точек:
+
+```text
+ttl=0x00
+left_angle=nan
+right_angle=nan
 ```
 
-Output video:
+Проверять plugin в таком случае лучше synthetic test, где точки создаются
+искусственно и ACK показывает ожидаемый TTL.
 
-```python
-DUAL_SAVE_OUTPUT_VIDEO = False
-DUAL_OUTPUT_LEFT_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\dual_rt_dlc_live_left.mp4")
-DUAL_OUTPUT_RIGHT_PATH = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\dual_rt_dlc_live_right.mp4")
-```
+### Нужно поменять bodyparts
 
-For lowest CPU usage, set both display and video save to `False`.
+Для custom point set:
 
-## Troubleshooting
-
-### Camera import/config error
-
-Check:
-
-- GalaxyView is closed.
-- Camera serials match `DUAL_CAMERAS`.
-- `.txt` config files exist.
-- USB3 hub is stable.
-- No other program is using the cameras.
-
-### Open Ephys does not receive packets
-
-Check:
-
-```powershell
-netstat -ano -p udp | Select-String ':47000'
-```
-
-Then run the synthetic test:
-
-```powershell
-C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --count 5 --wait-ack
-```
-
-If synthetic packets work, inspect live Python logs for camera/model errors and
-confirm:
-
-```python
-DUAL_OE_BRIDGE_ENABLED = True
-DUAL_OE_BRIDGE_HOST = "127.0.0.1"
-DUAL_OE_BRIDGE_PORT = 47000
-```
-
-### GPU is not loaded enough
-
-Check stage profiler first. If `preprocess` or `display` is high, CPU work is
-the bottleneck. If `inference` is high and GPU utilization is low, inspect:
-
-- PyTorch CUDA availability;
-- active environment `C:\dlc_live_env`;
-- model runner compatibility with batch path;
-- CPU thread contention from OpenCV/display.
-
-### `display` is high
-
-Use:
-
-```python
-DUAL_DISPLAY_WINDOW = False
-DUAL_SAVE_OUTPUT_VIDEO = False
-```
-
-### Need custom bodyparts
-
-For custom points, use JSON while updating the plugin:
+1. Убедись, что новые точки есть в exported model config.
+2. Измени `DUAL_SIDE_POINT_SETS`.
+3. Проверь `DUAL_USE_POINTS`.
+4. Если binary order изменился, поставь:
 
 ```python
 DUAL_OE_BRIDGE_WIRE_FORMAT = "json"
 ```
 
-Binary mode validates the fixed six-point order and will reject incompatible
-`DUAL_USE_POINTS`.
-
-## Maintenance Notes
-
-When changing the protocol:
-
-1. Update `dual_rt_dlc_live.py`.
-2. Update `send_dual_dlc_bridge_test.py`.
-3. Update `open_ephys_plugin/DualDLCLiveBridge`.
-4. Update this README and the plugin README.
-5. Run `py_compile`.
-6. Run synthetic binary and JSON tests.
-7. Rebuild the plugin if C++ changed.
+Binary path требует фиксированный six-point порядок.
