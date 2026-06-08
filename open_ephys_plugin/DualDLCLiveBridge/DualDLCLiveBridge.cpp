@@ -3,9 +3,9 @@
 
     Dual DLCLive bridge for Open Ephys GUI.
 
-    Receives dual DLCLive UDP JSON packets. Legacy packets can still provide
-    ttl_lines, while pose.v1 packets provide raw pose points and let this
-    processor compute validity, angle triggers and TTL states.
+    Receives dual DLCLive UDP packets. Production packets use the compact DDLP
+    binary pose format; JSON pose packets and legacy ttl_lines packets remain
+    available for compatibility.
 
     ------------------------------------------------------------------
 */
