@@ -361,6 +361,47 @@ def setup_dual_logger() -> logging.Logger:
     return logger
 
 
+def configure_runtime_backends(logger: logging.Logger) -> None:
+    try:
+        cv2.setUseOptimized(True)
+        cv2_threads = int(getattr(config, "DUAL_CV2_NUM_THREADS", -1))
+        if cv2_threads >= 0:
+            cv2.setNumThreads(cv2_threads)
+        logger.info("CV2_BACKEND optimized=%s threads=%d", cv2.useOptimized(), cv2.getNumThreads())
+    except Exception as exc:
+        logger.warning("CV2 backend tuning failed: %s", exc)
+
+    try:
+        import torch
+
+        torch_threads = int(getattr(config, "DUAL_TORCH_NUM_THREADS", 0))
+        if torch_threads > 0:
+            torch.set_num_threads(torch_threads)
+
+        interop_threads = int(getattr(config, "DUAL_TORCH_INTEROP_THREADS", 0))
+        if interop_threads > 0:
+            try:
+                torch.set_num_interop_threads(interop_threads)
+            except RuntimeError as exc:
+                logger.warning("Torch interop thread tuning skipped: %s", exc)
+
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.benchmark = bool(getattr(config, "DUAL_TORCH_CUDNN_BENCHMARK", True))
+            torch.backends.cudnn.allow_tf32 = bool(getattr(config, "DUAL_TORCH_ALLOW_TF32", False))
+        if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+            torch.backends.cuda.matmul.allow_tf32 = bool(getattr(config, "DUAL_TORCH_ALLOW_TF32", False))
+
+        logger.info(
+            "TORCH_BACKEND threads=%d interop=%d cudnn_benchmark=%s allow_tf32=%s",
+            torch.get_num_threads(),
+            torch.get_num_interop_threads(),
+            getattr(getattr(torch.backends, "cudnn", None), "benchmark", "n/a"),
+            bool(getattr(config, "DUAL_TORCH_ALLOW_TF32", False)),
+        )
+    except Exception as exc:
+        logger.warning("Torch backend tuning failed: %s", exc)
+
+
 def parse_galaxy_config(path: Path) -> dict[str, float | int | str]:
     result: dict[str, float | int | str] = {}
     keys = {
@@ -977,7 +1018,7 @@ def run_batch_inference(
         tensors.append(transformed)
 
     with torch.inference_mode():
-        model_input = torch.stack(tensors, dim=0).to(runner.device)
+        model_input = torch.stack(tensors, dim=0).to(device=runner.device, non_blocking=True)
         if str(getattr(runner, "precision", "FP32")).upper() == "FP16":
             model_input = model_input.half()
         outputs = runner.model(model_input)
@@ -1196,6 +1237,12 @@ def add_dual_text(
         y += 22
 
 
+def frame_for_opencv_display(frame: np.ndarray) -> np.ndarray:
+    if str(getattr(config, "GALAXY_OUTPUT_COLOR", "bgr")).strip().lower() == "rgb":
+        return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    return frame.copy()
+
+
 def write_csv_row(csv_path: Path, header_written: bool, row: list[object]) -> bool:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with open(csv_path, "a", newline="", encoding="utf-8") as handle:
@@ -1238,6 +1285,7 @@ def make_writer(path: Path, frame: np.ndarray, fps: float) -> cv2.VideoWriter:
 def main() -> None:
     validate_dual_config()
     logger = setup_dual_logger()
+    configure_runtime_backends(logger)
     bridge = OpenEphysBridge(logger)
 
     runtimes = [build_camera_runtime(camera_cfg) for camera_cfg in config.DUAL_CAMERAS]
@@ -1335,6 +1383,9 @@ def main() -> None:
         save_output_video = bool(getattr(config, "DUAL_SAVE_OUTPUT_VIDEO", False))
         profile_log_every = max(1, int(getattr(config, "DUAL_PROFILE_LOG_EVERY_N_PAIRS", 120)))
         last_result_seq = -1
+        profile_start_perf = time.perf_counter()
+        last_profile_perf = profile_start_perf
+        last_profile_result_seq = 0
 
         while not stop_event.is_set():
             result_seq, result = get_latest_inference(inference_state)
@@ -1386,8 +1437,8 @@ def main() -> None:
                     "source_drops": right.source.dropped_total,
                 }
 
-                left_display = live.draw_overlay(left_packet.frame.copy(), draw_points_for_result(left_result), left_metrics)
-                right_display = live.draw_overlay(right_packet.frame.copy(), draw_points_for_result(right_result), right_metrics)
+                left_display = live.draw_overlay(frame_for_opencv_display(left_packet.frame), draw_points_for_result(left_result), left_metrics)
+                right_display = live.draw_overlay(frame_for_opencv_display(right_packet.frame), draw_points_for_result(right_result), right_metrics)
                 add_dual_text(
                     left_display,
                     left,
@@ -1473,7 +1524,22 @@ def main() -> None:
                     )
 
             if profiler.enabled and pair_index % profile_log_every == 0:
-                logger.info("stage_profile pair=%d %s", pair_index, profiler.format_snapshot())
+                now = time.perf_counter()
+                profile_elapsed = max(now - last_profile_perf, 1e-9)
+                total_elapsed = max(now - profile_start_perf, 1e-9)
+                result_delta = max(0, result_seq - last_profile_result_seq)
+                with inference_state.lock:
+                    skipped_pairs = inference_state.skipped_pairs
+                logger.info(
+                    "stage_profile pair=%d result_hz=%.2f total_hz=%.2f skipped=%d %s",
+                    pair_index,
+                    result_delta / profile_elapsed,
+                    result_seq / total_elapsed,
+                    skipped_pairs,
+                    profiler.format_snapshot(),
+                )
+                last_profile_perf = now
+                last_profile_result_seq = result_seq
 
             for runtime in runtimes:
                 if runtime.last_error is not None:

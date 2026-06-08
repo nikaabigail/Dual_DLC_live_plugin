@@ -44,7 +44,22 @@ DUAL_FAST_POSE_ONLY = True
 DUAL_ENABLE_BATCH_INFERENCE = True
 DUAL_BATCH_FALLBACK_TO_SEQUENTIAL = True
 DUAL_ENABLE_STAGE_PROFILER = True
+DUAL_DISPLAY_WINDOW = False
+GALAXY_OUTPUT_COLOR = "rgb"
+CONVERT_TO_RGB = False
 ```
+
+Для CPU throttling есть ручные переключатели:
+
+```python
+DUAL_CV2_NUM_THREADS = -1
+DUAL_TORCH_NUM_THREADS = 0
+DUAL_TORCH_INTEROP_THREADS = 0
+```
+
+`-1/0` означает “оставить стандартные OpenCV/PyTorch threadpool-настройки”.
+Если нужно снизить CPU любой ценой, можно поставить все три значения в `1`, но
+по live A/B это уменьшало `result_hz`.
 
 Python делает:
 
@@ -107,9 +122,10 @@ python/config_dual_rt_dlc_live.py
 from config_rt_dlc_live import *
 ```
 
-Поэтому `MODEL_PATH`, `DEVICE`, `CONVERT_TO_RGB`, часть DLCLive-настроек и
-некоторые shared параметры берутся из `config_rt_dlc_live.py`, если dual config
-их не переопределил.
+Поэтому `MODEL_PATH`, `DEVICE`, часть DLCLive-настроек и некоторые shared
+параметры берутся из `config_rt_dlc_live.py`, если dual config их не
+переопределил. В рабочем dual-конфиге `CONVERT_TO_RGB` переопределен в `False`,
+потому что Galaxy SDK уже отдает RGB-кадр после Bayer-конверсии.
 
 ## Камеры
 
@@ -169,8 +185,12 @@ MODEL_TYPE = "pytorch"
 DEVICE = "cuda"
 PRECISION = "FP32"
 SINGLE_ANIMAL = True
-CONVERT_TO_RGB = True
+GALAXY_OUTPUT_COLOR = "rgb"
+CONVERT_TO_RGB = False
 ```
+
+В single-camera конфиге `CONVERT_TO_RGB` может оставаться `True`; dual runtime
+переопределяет его, чтобы убрать лишнюю CPU-конверсию RGB->BGR->RGB.
 
 При запуске лог должен показать:
 
@@ -487,7 +507,7 @@ DUAL_PROFILE_EMA_ALPHA = 0.10
 Пример:
 
 ```text
-stage_profile pair=120 last_ms camera/read=10.23 preprocess=1.10 inference=43.93 pack/send=0.20 display=0.00 | avg_ms ...
+stage_profile pair=120 result_hz=23.4 total_hz=20.1 skipped=0 last_ms camera/read=10.23 preprocess=1.10 inference=43.93 pack/send=0.20 display=0.00 | avg_ms ...
 ```
 
 | Stage | Что входит |
@@ -497,6 +517,8 @@ stage_profile pair=120 last_ms camera/read=10.23 preprocess=1.10 inference=43.93
 | `inference` | PyTorch runner/model inference. |
 | `pack/send` | Упаковка UDP и `socket.sendto`. |
 | `display` | OpenCV overlay, resize, video writer, `imshow`. |
+| `result_hz` | Частота обработанных left/right пар за последний интервал профайлера. |
+| `total_hz` | Средняя частота обработанных пар с начала live loop. |
 
 Как читать:
 

@@ -151,6 +151,9 @@ class GalaxyCameraSource(FrameSource):
         self.is_color = True
         self.dropped_total = 0
         self._dll_dir_handles: list[object] = []
+        self.output_color = str(getattr(config, "GALAXY_OUTPUT_COLOR", "bgr")).strip().lower()
+        if self.output_color not in {"bgr", "rgb"}:
+            raise ValueError("GALAXY_OUTPUT_COLOR must be 'bgr' or 'rgb'.")
 
     def open(self) -> None:
         self._prepare_sdk_environment()
@@ -408,14 +411,18 @@ class GalaxyCameraSource(FrameSource):
             if arr is None:
                 return None
             if arr.ndim == 2:
-                return cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+                code = cv2.COLOR_GRAY2RGB if self.output_color == "rgb" else cv2.COLOR_GRAY2BGR
+                return cv2.cvtColor(arr, code)
+            if self.output_color == "rgb":
+                return arr
             return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
         arr = raw_image.get_numpy_array()
         if arr is None:
             return None
         if arr.ndim == 2:
-            return cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+            code = cv2.COLOR_GRAY2RGB if self.output_color == "rgb" else cv2.COLOR_GRAY2BGR
+            return cv2.cvtColor(arr, code)
         return arr
 
     def _read_source_fps(self) -> float:

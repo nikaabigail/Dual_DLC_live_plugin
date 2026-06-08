@@ -39,6 +39,12 @@ CROPPING = None
 RESIZE = 1.0
 DYNAMIC_CROPPING = (False, 0.5, 10)
 
+# Galaxy SDK already converts Bayer frames to RGB. In dual fast-mode we keep the
+# frame RGB and disable DLCLive's BGR->RGB conversion to avoid a redundant CPU
+# color shuffle. Single-camera configs keep their original BGR/OpenCV behavior.
+GALAXY_OUTPUT_COLOR = "rgb"
+CONVERT_TO_RGB = False
+
 
 # ============================================================================
 # Tracked points
@@ -59,7 +65,9 @@ DUAL_USE_POINTS = sorted({point for points in DUAL_SIDE_POINT_SETS.values() for 
 # Runtime/display
 # ============================================================================
 DUAL_WINDOW_NAME = "DLC Live dual Galaxy"
-DUAL_DISPLAY_WINDOW = True
+# Working stimulation mode should not draw OpenCV windows: display/resize/overlay
+# can add tens of milliseconds per pair and does not affect UDP pose output.
+DUAL_DISPLAY_WINDOW = False
 DUAL_SHOW_SCALE = 0.5
 DUAL_PROCESS_EVERY_N_PAIRS = 1
 DUAL_PAIR_WAIT_TIMEOUT_MS = 2000
@@ -109,6 +117,15 @@ DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG = None
 # ============================================================================
 # Optimization switches
 # ============================================================================
+# Optional CPU throttling. The measured working default leaves OpenCV/PyTorch
+# threadpools untouched for better result_hz. Set these to 1 only if CPU load is
+# more important than maximum throughput.
+DUAL_CV2_NUM_THREADS = -1
+DUAL_TORCH_NUM_THREADS = 0
+DUAL_TORCH_INTEROP_THREADS = 0
+DUAL_TORCH_CUDNN_BENCHMARK = True
+DUAL_TORCH_ALLOW_TF32 = False
+
 # In the normal plugin-driven mode Python sends only raw pose points. Filtering,
 # side selection, angle calculation, refractory logic and TTL generation are done
 # in the Open Ephys plugin. Disable this only when you need Python-side angle

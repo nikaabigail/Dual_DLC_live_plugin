@@ -69,6 +69,9 @@ DUAL_FAST_POSE_ONLY = True
 DUAL_ENABLE_BATCH_INFERENCE = True
 DUAL_BATCH_FALLBACK_TO_SEQUENTIAL = True
 DUAL_ENABLE_STAGE_PROFILER = True
+DUAL_DISPLAY_WINDOW = False
+GALAXY_OUTPUT_COLOR = "rgb"
+CONVERT_TO_RGB = False
 ```
 
 Пояснение:
@@ -78,6 +81,20 @@ DUAL_ENABLE_STAGE_PROFILER = True
 - `DUAL_FAST_POSE_ONLY = True`: Python не строит фильтрованные точки и углы для рабочего пути.
 - `DUAL_ENABLE_BATCH_INFERENCE = True`: две камеры по возможности считаются одним mini-batch.
 - `DUAL_ENABLE_STAGE_PROFILER = True`: логируются стадии `camera/read`, `preprocess`, `inference`, `pack/send`, `display`.
+- `DUAL_DISPLAY_WINDOW = False`: рабочий режим не тратит время на OpenCV overlay/window.
+- `GALAXY_OUTPUT_COLOR = "rgb"` и `CONVERT_TO_RGB = False`: Daheng/Galaxy уже отдает RGB после Bayer-конверсии, поэтому DLCLive не делает лишний BGR->RGB shuffle.
+
+CPU throttling оставлен как ручной переключатель:
+
+```python
+DUAL_CV2_NUM_THREADS = -1
+DUAL_TORCH_NUM_THREADS = 0
+DUAL_TORCH_INTEROP_THREADS = 0
+```
+
+`-1/0` означает “не менять стандартные threadpool-настройки”. Если CPU важнее
+максимальной частоты, можно поставить все три значения в `1`, но на текущем
+тесте это снижало `result_hz`.
 
 ## Камеры и ROI
 
@@ -102,6 +119,8 @@ DUAL_ENABLE_STAGE_PROFILER = True
 CROPPING = None
 RESIZE = 1.0
 DYNAMIC_CROPPING = (False, 0.5, 10)
+GALAXY_OUTPUT_COLOR = "rgb"
+CONVERT_TO_RGB = False
 ```
 
 Если GalaxyView открыт и держит камеры, Python может не открыть устройства.
@@ -421,7 +440,7 @@ Opened left sn=FDE22070174 ...
 Opened right sn=FDE22070175 ...
 CUDA_CHECK ... cuda=True gpu=NVIDIA GeForce RTX 5070 Laptop GPU
 Fast pose-only mode enabled ...
-stage_profile pair=...
+stage_profile pair=... result_hz=... total_hz=... skipped=... last_ms ... | avg_ms ...
 ```
 
 ## Как понять, что все работает
@@ -454,7 +473,7 @@ ttl=0x00
 Строка:
 
 ```text
-stage_profile pair=120 last_ms camera/read=10.0 preprocess=1.5 inference=60.0 pack/send=0.4 display=0.0 | avg_ms ...
+stage_profile pair=120 result_hz=23.4 total_hz=20.1 skipped=0 last_ms camera/read=10.0 preprocess=1.5 inference=60.0 pack/send=0.4 display=0.0 | avg_ms ...
 ```
 
 Смысл стадий:
@@ -466,6 +485,8 @@ stage_profile pair=120 last_ms camera/read=10.0 preprocess=1.5 inference=60.0 pa
 | `inference` | PyTorch/DLCLive inference для текущей пары. |
 | `pack/send` | Упаковка binary/JSON UDP и `sendto`. |
 | `display` | OpenCV overlay, resize, video writer, `imshow`. |
+| `result_hz` | Частота обработанных left/right пар за последний интервал профайлера. |
+| `total_hz` | Средняя частота обработанных пар с начала live loop. |
 
 Если `display=0.00`, значит окно и сохранение видео выключены или не тратят
 значимое CPU. Если `inference` прыгает до сотен ms, узкое место сейчас модель/GPU
