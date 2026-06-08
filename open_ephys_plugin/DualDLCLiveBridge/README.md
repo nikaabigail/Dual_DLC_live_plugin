@@ -4,8 +4,7 @@
 UDP-пакеты от `dual_rt_dlc_live.py`, берет сырые точки позы DLCLive и превращает
 их в изменения TTL-состояний Open Ephys.
 
-Плагин не открывает камеры и не запускает нейросеть. Камеры и DLCLive находятся
-на стороне Python.
+Камеры и DLCLive находятся на стороне Python.
 
 ```text
 dual_rt_dlc_live.py
