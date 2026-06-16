@@ -4,11 +4,14 @@
 позу через DLCLive/PyTorch, передать сырые точки в плагин Open Ephys по UDP и
 уже внутри плагина сформировать TTL-состояния для дальнейшей стимуляции.
 
+> **Установка с нуля** (куда клонировать, как поставить окружение, как запустить): **[`docs/INSTALL_AND_RUN.md`](docs/INSTALL_AND_RUN.md)**.
+
 ## Карта документации
 
 | Файл | Что в нем искать |
 | --- | --- |
 | `README.md` | Общая схема, порядок выполнения, быстрый запуск, связь UDP/TTL. |
+| `docs/INSTALL_AND_RUN.md` | Установка с нуля: клонирование, драйвер, Python, venv, SDK, модель, плагин, запуск. |
 | `python/README_OPEN_EPHYS_BRIDGE.md` | Подробно про Python runtime: камеры, DLCLive, binary fast-mode, profiler, логи. |
 | `open_ephys_plugin/DualDLCLiveBridge/README.md` | Подробно про C++ плагин Open Ephys: параметры, входные пакеты, фильтрация, TTL. |
 | `docs/README_DLC_live.md` | Старый single-camera `rt_dlc_live.py`, нужен для отладки одной камеры и модели. |
@@ -410,7 +413,8 @@ angle_threshold_deg = нужный порог
 Рабочий binary-путь:
 
 ```powershell
-C:\dlc_live_env\Scripts\python.exe C:\dlc\DLC_OBS_Spinal_cord_stimulation\send_dual_dlc_bridge_test.py --mode pose --wire-format binary --count 5 --interval 0.025 --wait-ack
+cd C:\dlc\Dual_DLC_live_plugin\python
+C:\dlc_live_env\Scripts\python.exe send_dual_dlc_bridge_test.py --mode pose --wire-format binary --count 5 --interval 0.025 --wait-ack
 ```
 
 Ожидаемый результат:
@@ -428,9 +432,11 @@ dual_dlc_live.ack ... mode=binary ...
 Закрыть GalaxyView, затем:
 
 ```powershell
-cd C:\dlc\DLC_OBS_Spinal_cord_stimulation
+cd C:\dlc\Dual_DLC_live_plugin\python
 C:\dlc_live_env\Scripts\python.exe dual_rt_dlc_live.py
 ```
+
+(Однокамерный боевой режим: `C:\dlc_live_env\Scripts\python.exe single_rt_dlc_live_bridge.py --profile single-best --no-display`.)
 
 В логе должны появиться:
 
