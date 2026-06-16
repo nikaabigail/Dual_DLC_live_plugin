@@ -1,0 +1,236 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Отчет о выполненной работе DLCLive и Open Ephys bridge 02-10.06.2026</title>
+<style>
+  body { font-family: Arial, sans-serif; color: #1f2933; line-height: 1.45; }
+  h1 { font-size: 22pt; margin-bottom: 8px; color: #111827; }
+  h2 { font-size: 16pt; margin-top: 22px; margin-bottom: 8px; color: #1f3a5f; }
+  h3 { font-size: 13pt; margin-top: 16px; margin-bottom: 6px; color: #374151; }
+  p { margin: 6px 0; }
+  ul, ol { margin-top: 4px; margin-bottom: 8px; }
+  li { margin: 3px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0 14px 0; font-size: 10pt; }
+  th { background: #e8f0fe; color: #111827; font-weight: bold; }
+  th, td { border: 1px solid #b8c2cc; padding: 6px 7px; vertical-align: top; }
+  .lead { font-size: 11pt; color: #374151; }
+  .note { background: #f8fafc; border-left: 4px solid #4f81bd; padding: 8px 10px; margin: 10px 0; }
+  .metric { font-weight: bold; color: #0f766e; }
+  .risk { font-weight: bold; color: #b45309; }
+  .ok { font-weight: bold; color: #166534; }
+  code { font-family: Consolas, monospace; background: #f3f4f6; padding: 1px 3px; }
+</style>
+</head>
+<body>
+<h1>Отчет о выполненной работе: realtime DLCLive и Open Ephys bridge</h1>
+<p class="lead"><b>Период:</b> 02.06.2026-10.06.2026</p>
+<p class="lead"><b>Тема:</b> разработка и проверка realtime-контура для closed-loop стимуляции на основе видеопотока с Daheng/Galaxy камер, оценки позы через DLCLive/PyTorch и формирования TTL-событий в Open Ephys.</p>
+
+<h2>1. Краткое резюме для всех читателей</h2>
+<p>За время работы был собран и проверен прототип системы, которая получает видеопоток с высокоскоростной камеры, определяет положение ключевых точек задней конечности животного и передает эти данные в Open Ephys для дальнейшей стимуляции. Главная идея текущей архитектуры: Python занимается зрением и нейросетевым инференсом, а плагин Open Ephys на C++ принимает сырые точки и сам решает, какие TTL-линии должны быть активированы.</p>
+<p>Практически рабочим на данный момент является режим с одной левой камерой. Двухкамерная схема технически подготовлена, но правая камера в текущей физической установке не дает надежного изображения животного, поэтому ее пока нельзя использовать для финального closed-loop решения.</p>
+<div class="note">
+<p><b>Текущее рабочее состояние:</b> одна левая камера <code>FDE22070174</code>, кадр <code>1920 x 220 px</code>, частота камеры <code>100 Hz</code>, нейросеть на GPU RTX 5070, передача данных в Open Ephys по UDP <code>127.0.0.1:47000</code>.</p>
+</div>
+
+<h2>2. Что Было Сделано В Итоге</h2>
+<ul>
+  <li>Настроен realtime-захват изображения с Daheng/Galaxy USB3 камеры с аппаратным ROI <code>1920 x 220 px</code>.</li>
+  <li>Реализован low-latency подход: система берет свежий кадр и не накапливает очередь старых кадров.</li>
+  <li>Подготовлена двухкамерная схема для камер <code>FDE22070174</code> и <code>FDE22070175</code>.</li>
+  <li>Выбран основной формат обмена с Open Ephys: compact binary пакет <code>DDLP/v1</code> размером около <span class="metric">252 bytes</span>.</li>
+  <li>Перенесена логика фильтрации, проверки триплета, расчета угла и TTL из Python в C++-плагин Open Ephys.</li>
+  <li>Создан рабочий single-camera режим, где левая камера передается как активная сторона, а правая сторона безопасно заполняется <code>NaN</code>.</li>
+  <li>Добавлены режимы запуска для FP32+TF32, strict FP32, FP16, CPU-balanced и RGB fallback.</li>
+  <li>Добавлен stage profiler, который показывает задержку по стадиям: camera/read, preprocess, inference, pack/send, display.</li>
+  <li>Подготовлен режим визуальной проверки точек и отдельный headless-режим без окна для финальной стимуляции.</li>
+</ul>
+
+<h2>3. Термины Простыми Словами</h2>
+<table>
+  <tr><th>Термин</th><th>Объяснение</th><th>Зачем это нужно</th></tr>
+  <tr><td>DLCLive</td><td>Realtime-версия DeepLabCut для оценки позы по кадру.</td><td>Определяет координаты суставов и конечностей.</td></tr>
+  <tr><td>ROI</td><td>Область изображения, которую камера реально передает.</td><td>Уменьшает размер кадра и ускоряет обработку.</td></tr>
+  <tr><td>TTL</td><td>Цифровой сигнал 0/1, который можно использовать для запуска стимуляции.</td><td>Передает решение системы в downstream stimulation/output.</td></tr>
+  <tr><td>Triplet</td><td>Три точки конечности: hip, ankle, toes.</td><td>По ним можно посчитать угол задней конечности.</td></tr>
+  <tr><td>Likelihood</td><td>Уверенность модели в найденной точке.</td><td>Позволяет отбрасывать ненадежные точки.</td></tr>
+  <tr><td>FP32 / TF32 / FP16</td><td>Форматы вычислений нейросети.</td><td>Влияют на скорость и численную стабильность координат.</td></tr>
+  <tr><td>Headless</td><td>Запуск без окна с видео.</td><td>Уменьшает задержку для настоящего эксперимента.</td></tr>
+</table>
+
+<h2>4. Численные Показатели Текущего Прототипа</h2>
+<table>
+  <tr><th>Параметр</th><th>Значение</th><th>Комментарий</th></tr>
+  <tr><td>Размер кадра</td><td><span class="metric">1920 x 220 px</span></td><td>Аппаратный ROI камеры.</td></tr>
+  <tr><td>Частота камеры</td><td><span class="metric">100 Hz</span></td><td>Настройка Daheng/Galaxy.</td></tr>
+  <tr><td>GPU</td><td>RTX 5070 Laptop GPU</td><td>PyTorch работает на CUDA.</td></tr>
+  <tr><td>Основной runtime FPS</td><td><span class="metric">38-42 FPS</span></td><td>После warm-up в single-camera preview режиме.</td></tr>
+  <tr><td>Средний inference</td><td><span class="metric">18.6 ms</span></td><td>Последний прогон на 4700 frames.</td></tr>
+  <tr><td>Видимые точки</td><td><span class="metric">2.97/6</span></td><td>В среднем видна примерно одна сторона задней конечности.</td></tr>
+  <tr><td>Пропуски кадров</td><td><span class="metric">13 из 4700</span></td><td>Около <span class="metric">0.28%</span>.</td></tr>
+  <tr><td>Стоимость display</td><td><span class="metric">4.5-6.9 ms</span></td><td>Окно нужно для контроля, но не для финальной стимуляции.</td></tr>
+  <tr><td>Стоимость pack/send</td><td><span class="metric">0.11-0.15 ms</span></td><td>UDP-упаковка не является bottleneck.</td></tr>
+</table>
+
+<h2>5. Хронология Работы По Дням</h2>
+
+<h3>02.06.2026 - постановка двухкамерной архитектуры</h3>
+<p>В этот день была сформулирована задача перехода от одиночного видеопотока к архитектуре с двумя физическими камерами. Были зафиксированы серийные номера камер: левая <code>FDE22070174</code>, правая <code>FDE22070175</code>. Главная гипотеза дня: задержка системы определяется не только скоростью нейросети, но и способом чтения кадров из камеры.</p>
+<ul>
+  <li>Целевой кадр: <code>1920 x 220 px</code>.</li>
+  <li>Целевая частота камеры: <code>100 Hz</code>.</li>
+  <li>Левый ROI: примерно <code>OffsetY = 510 px</code>.</li>
+  <li>Правый ROI: примерно <code>OffsetY = 530 px</code>.</li>
+  <li>Принято решение брать самый свежий кадр и отбрасывать старые.</li>
+</ul>
+<p><b>Вывод:</b> для closed-loop стимуляции важнее свежесть кадра, чем обработка каждого кадра.</p>
+
+<h3>03.06.2026 - проектирование протокола обмена и разделение ответственности</h3>
+<p>На этом этапе сравнивались два подхода: отправлять из Python готовые TTL-линии или отправлять сырые координаты точек. Был выбран второй подход: Python выполняет только зрение и упаковку данных, а Open Ephys plugin принимает решение о TTL.</p>
+<ul>
+  <li>Python: камера, DLCLive/PyTorch, raw pose points.</li>
+  <li>C++ plugin: фильтрация, triplet, угол, TTL.</li>
+  <li>Фиксированный набор данных: <code>6</code> точек в формате <code>[x, y, likelihood]</code>.</li>
+  <li>UDP port: <code>47000</code>.</li>
+</ul>
+<p><b>Вывод:</b> перенос decision logic в C++ уменьшает нагрузку Python и делает Open Ephys центральным местом управления стимуляцией.</p>
+
+<h3>04.06.2026 - проверка C++ bridge и TTL pipeline</h3>
+<p>Была проверена C++-сторона Open Ephys bridge. Она должна принимать UDP-пакет, разбирать координаты, проверять валидность точек, считать угол и формировать TTL word.</p>
+<ul>
+  <li>Основной формат: binary <code>DDLP/v1</code>.</li>
+  <li>Размер пакета: около <code>252 bytes</code>.</li>
+  <li>TTL line 0: валиден левый triplet.</li>
+  <li>TTL line 1: валиден правый triplet.</li>
+  <li>TTL line 2: left angle trigger.</li>
+  <li>TTL line 3: right angle trigger.</li>
+</ul>
+<p><b>Вывод:</b> binary pose стал основным рабочим форматом, так как он быстрее и компактнее JSON.</p>
+
+<h3>05.06.2026 - safety-анализ и отказоустойчивость</h3>
+<p>День был посвящен проверке рисков. Рассматривались ситуации остановки Python, потери UDP-пакета, пропажи точек, NaN-заглушки правой стороны и отключенного angle trigger.</p>
+<ul>
+  <li>Порог использования точки: <code>conf_thresh_use = 0.20</code>.</li>
+  <li>Порог видимого triplet: <code>conf_thresh_draw = 0.15</code>.</li>
+  <li>Despike threshold: <code>150 px</code>.</li>
+  <li>Median window: <code>3</code>.</li>
+  <li>Angle threshold на старте: около <code>55 deg</code>.</li>
+</ul>
+<p><b>Вывод:</b> C++ plugin должен строго проверять <code>finite</code> значения, а для финального эксперимента нужен watchdog свежести данных.</p>
+
+<h3>06.06.2026 - методика сравнения режимов</h3>
+<p>Были определены критерии, по которым можно сравнивать разные варианты запуска: скорость, задержка, число видимых точек, стабильность likelihood и поведение TTL.</p>
+<ul>
+  <li>Сравниваемые режимы: FP32+TF32, strict FP32, FP16.</li>
+  <li>Отдельно сравниваются preview и headless.</li>
+  <li>Отдельно проверяется RGB no-convert и BGR to RGB fallback.</li>
+</ul>
+<p><b>Вывод:</b> FPS сам по себе недостаточен. Нужно одновременно смотреть inference time, raw visible points, likelihood и TTL behavior.</p>
+
+<h3>07.06.2026 - анализ latency и CPU/GPU нагрузки</h3>
+<p>На этом этапе проверялась гипотеза, почему видео может выглядеть запаздывающим. Главный вывод: задержка складывается из нескольких стадий, а не только из инференса нейросети.</p>
+<ul>
+  <li>camera/read;</li>
+  <li>preprocess;</li>
+  <li>inference;</li>
+  <li>pack/send;</li>
+  <li>display.</li>
+</ul>
+<p>Также было установлено, что низкая видимая загрузка GPU в Task Manager не означает, что модель работает на CPU. PyTorch подтверждал CUDA и устройство <code>cuda:0</code>.</p>
+<p><b>Вывод:</b> CPU остается важным, потому что камера, OpenCV, display, упаковка и Python scheduling не исчезают даже при GPU-инференсе.</p>
+
+<h3>08.06.2026 - end-to-end архитектура и цветовой путь</h3>
+<p>Была разобрана полная цепочка от камеры до TTL и отдельно проверен вопрос RGB/BGR. Это было важно, потому что неправильный порядок каналов может резко ухудшить точность модели.</p>
+<ul>
+  <li>Рабочий вариант: камера отдает RGB.</li>
+  <li>DLCLive conversion отключен.</li>
+  <li>Модель получает RGB без лишнего CPU shuffle.</li>
+  <li>Программный crop не нужен, так как используется аппаратный ROI.</li>
+  <li>Resize: <code>1.0</code>.</li>
+  <li>Dynamic cropping выключен.</li>
+</ul>
+<p><b>Вывод:</b> цветовой путь в рабочем режиме корректен, а лишняя конвертация убрана ради снижения CPU-нагрузки.</p>
+
+<h3>09.06.2026 - основной realtime-прогресс и single-camera режим</h3>
+<p>Двухкамерный режим был технически подготовлен, но правая камера не давала полезную детекцию. Типичная картина: левая сторона имеет около <code>3/6</code> видимых точек, правая сторона часто имеет <code>0/6</code>, likelihood правой стороны около <code>0.01</code>. Поэтому был создан практический single-camera режим.</p>
+<ul>
+  <li>Активная камера: левая <code>FDE22070174</code>.</li>
+  <li>Правая сторона пакета: <code>NaN</code>.</li>
+  <li>Правые TTL-линии должны оставаться неактивными.</li>
+  <li>UDP формат остался тем же, чтобы плагин не требовал отдельного single-протокола.</li>
+</ul>
+<p>Численные результаты дня:</p>
+<table>
+  <tr><th>Режим</th><th>Frames</th><th>Avg inference</th><th>Avg raw visible</th><th>Drops</th></tr>
+  <tr><td>single-best</td><td>590</td><td>23.6 ms</td><td>2.91/6</td><td>4</td></tr>
+  <tr><td>single-fp16</td><td>1145</td><td>23.4 ms</td><td>2.74/6</td><td>3</td></tr>
+  <tr><td>single-rgb-on</td><td>409</td><td>23.6 ms</td><td>2.84/6</td><td>5</td></tr>
+</table>
+<p><b>Вывод:</b> основным рабочим вариантом стал FP32+TF32 с одной левой камерой. FP16 оставлен как экспериментальный режим, а не как финальный.</p>
+
+<h3>10.06.2026 - визуальная проверка точек и финальное документирование</h3>
+<p>По запросу пользователя preview-видео было включено для всех режимов запуска, чтобы можно было смотреть, как точки ложатся на животное. Для финальной стимуляции сохранен отдельный headless запуск без окна.</p>
+<p>Результаты свежего прогона:</p>
+<table>
+  <tr><th>Метрика</th><th>Значение</th></tr>
+  <tr><td>Frames</td><td>4700</td></tr>
+  <tr><td>Avg inference</td><td>18.6 ms</td></tr>
+  <tr><td>Avg raw visible</td><td>2.97/6</td></tr>
+  <tr><td>Drops</td><td>13</td></tr>
+  <tr><td>Drop fraction</td><td>0.28%</td></tr>
+  <tr><td>Live FPS после warm-up</td><td>38-42</td></tr>
+  <tr><td>Display cost</td><td>4.5-6.9 ms</td></tr>
+  <tr><td>Pack/send</td><td>0.11-0.14 ms</td></tr>
+</table>
+<p>Во втором близком прогоне было обработано <code>8328 frames</code>, средний inference составил <code>21.4 ms</code>, среднее число видимых точек <code>3.10/6</code>, drops <code>27</code>, что соответствует примерно <code>0.32%</code>.</p>
+<p><b>Вывод:</b> система пригодна для визуальной realtime-проверки. Для стимуляции лучше запускать без preview, потому что окно добавляет около <code>5 ms</code> задержки.</p>
+
+<h2>6. Сводная Таблица По Дням</h2>
+<table>
+  <tr><th>Дата</th><th>Фокус</th><th>Результат</th><th>Числа</th></tr>
+  <tr><td>02.06.2026</td><td>Две камеры и ROI</td><td>Определена latest-frame стратегия</td><td>1920 x 220, 100 Hz</td></tr>
+  <tr><td>03.06.2026</td><td>Протокол и роли</td><td>Python шлет raw pose, C++ считает TTL</td><td>6 точек, UDP 47000</td></tr>
+  <tr><td>04.06.2026</td><td>C++ bridge</td><td>Принят binary DDLP/v1</td><td>252 bytes, TTL 0-3</td></tr>
+  <tr><td>05.06.2026</td><td>Safety</td><td>Разобраны NaN, stale frames, UDP loss</td><td>conf 0.20/0.15, despike 150 px</td></tr>
+  <tr><td>06.06.2026</td><td>Методика</td><td>Определены критерии сравнения</td><td>FPS, ms, likelihood, TTL</td></tr>
+  <tr><td>07.06.2026</td><td>Latency</td><td>Разделены стадии задержки</td><td>camera/read, inference, display</td></tr>
+  <tr><td>08.06.2026</td><td>Архитектура и цвет</td><td>Выбран RGB no-convert</td><td>crop none, resize 1.0</td></tr>
+  <tr><td>09.06.2026</td><td>Single-camera режим</td><td>Правая камера исключена из рабочего контура</td><td>35-40 FPS, 18-24 ms</td></tr>
+  <tr><td>10.06.2026</td><td>Preview и проверка</td><td>Включен просмотр точек, headless сохранен</td><td>4700 frames, 18.6 ms, 0.28% drops</td></tr>
+</table>
+
+<h2>7. Выводы Для Не-Программистов</h2>
+<ol>
+  <li>Система уже умеет в реальном времени получать изображение с камеры и находить точки конечности.</li>
+  <li>Основная рабочая камера сейчас левая. Правая камера требует физической перенастройки.</li>
+  <li>Скорость достаточна для визуального контроля: около 38-42 FPS после warm-up.</li>
+  <li>Окно с видео полезно для проверки, но для реальной стимуляции его лучше выключать.</li>
+  <li>Решение о стимуляции теперь находится в Open Ephys, что логичнее для эксперимента.</li>
+</ol>
+
+<h2>8. Выводы Для Программистов</h2>
+<ol>
+  <li>Основной bottleneck - DLCLive/PyTorch inference, обычно <code>17-21 ms</code> в single-camera режиме.</li>
+  <li><code>pack/send</code> не является bottleneck: около <code>0.12 ms</code>.</li>
+  <li>Display стоит дорого: около <code>5 ms</code>, поэтому нужен headless mode.</li>
+  <li>Binary <code>DDLP/v1</code> оправдан как основной протокол, JSON оставить как fallback/debug.</li>
+  <li>FP16 нельзя включать в финальный эксперимент без сравнения TTL behavior с FP32.</li>
+  <li>Нужен watchdog свежести данных, чтобы stale frame не мог привести к неверной стимуляции.</li>
+</ol>
+
+<h2>9. Рекомендации Для Следующего Этапа</h2>
+<ul>
+  <li>Перед финальной стимуляцией запускать headless-режим без preview.</li>
+  <li>Физически перенастроить правую камеру и повторить проверку raw visible для правой стороны.</li>
+  <li>Проверить в Open Ephys: растет ли счетчик UDP packets, mode = binary, TTL lines работают ожидаемо.</li>
+  <li>Сравнить FP32+TF32 и strict FP32 на одних и тех же данных около порога угла.</li>
+  <li>Добавить watchdog свежести кадров и явную диагностику потери UDP-пакетов.</li>
+  <li>FP16 оставить только как экспериментальный режим до отдельной валидации координат и TTL.</li>
+</ul>
+
+<h2>10. Итог</h2>
+<p>За период 02.06.2026-10.06.2026 система была доведена до воспроизводимого realtime-прототипа. Было принято архитектурно важное решение: Python отвечает за видеопоток и нейросетевую оценку позы, а Open Ephys plugin отвечает за фильтрацию, расчет угла и формирование TTL. Это делает систему более понятной, быстрее в Python-части и удобнее для дальнейшей настройки стимуляции.</p>
+<p>Текущий наиболее надежный режим: <b>single-camera left, FP32+TF32, RGB no-convert, binary pose to Open Ephys, C++ plugin decision logic</b>. Для проверки точек используется preview, для финальной стимуляции рекомендуется headless-режим.</p>
+</body>
+</html>

@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 
 import config_dual_rt_dlc_live as config
+import live_profiles
 import rt_dlc_live as live
 
 
@@ -752,6 +753,23 @@ def count_visible_pose_array(points: np.ndarray) -> int:
     return int(np.count_nonzero(visible))
 
 
+def pose_likelihood_summary(result: dict[str, object]) -> str:
+    raw_pose_array = result.get("raw_pose_array")
+    if not isinstance(raw_pose_array, np.ndarray):
+        return "n/a"
+    pose_array = np.asarray(raw_pose_array)
+    if pose_array.ndim != 2 or pose_array.shape[1] < 3:
+        return "n/a"
+    parts: list[str] = []
+    for name, row in zip(config.DUAL_USE_POINTS, pose_array):
+        likelihood = row[2]
+        if np.isfinite(likelihood):
+            parts.append(f"{name}:{float(likelihood):.2f}")
+        else:
+            parts.append(f"{name}:nan")
+    return ",".join(parts)
+
+
 def pose_array_to_points(
     points: np.ndarray,
     names: list[str],
@@ -789,20 +807,72 @@ def draw_points_for_result(result: dict[str, object]) -> dict[str, dict[str, flo
     return pose_array_to_points(empty_pose_array(), config.DUAL_USE_POINTS)
 
 
-def print_model_device_after_init(dlc_live) -> None:
+def log_model_device_after_init(dlc_live) -> None:
+    logger = logging.getLogger("dual_rt_dlc_live")
     try:
         runner = getattr(dlc_live, "runner", None)
         model = getattr(dlc_live, "model", None) or getattr(runner, "model", None)
         if model is not None:
             first_param = next(model.parameters(), None)
-            print(
-                "DLC_MODEL_DEVICE_AFTER_INIT =",
+            logger.info(
+                "DLC_MODEL_DEVICE_AFTER_INIT=%s runner_device=%s precision=%s convert2rgb=%s",
                 first_param.device if first_param is not None else "no_params",
+                getattr(runner, "device", "n/a"),
+                getattr(runner, "precision", "n/a"),
+                getattr(dlc_live, "convert2rgb", "n/a"),
             )
         else:
-            print("DLC_MODEL_DEVICE_AFTER_INIT = model_is_none")
+            logger.info("DLC_MODEL_DEVICE_AFTER_INIT=model_is_none convert2rgb=%s", getattr(dlc_live, "convert2rgb", "n/a"))
     except Exception as exc:
-        print("DLC_MODEL_DEVICE_CHECK_FAILED =", exc)
+        logger.warning("DLC_MODEL_DEVICE_CHECK_FAILED=%s", exc)
+
+
+def maybe_compile_runner_model(dlc_live) -> None:
+    """Compile dlc_live.runner.model once with the configured torch.compile backend.
+
+    Controlled by config.DUAL_TORCH_COMPILE_BACKEND (default "" = off). "cudagraphs"
+    replays the identical eager kernels => bit-identical poses (accuracy-neutral, safe
+    for the closed-loop trigger) with lower per-frame overhead. Runs at most once per
+    runner; on any failure stays eager and never retries.
+    """
+    logger = logging.getLogger("dual_rt_dlc_live")
+    runner = getattr(dlc_live, "runner", None)
+    if runner is None or getattr(runner, "_dlc_compile_attempted", False):
+        return
+    runner._dlc_compile_attempted = True
+    backend = str(getattr(config, "DUAL_TORCH_COMPILE_BACKEND", "") or "").strip()
+    if not backend:
+        return
+    try:
+        import torch
+
+        runner._dlc_eager_model = runner.model
+        runner.model = torch.compile(runner.model, backend=backend)
+        logger.info("TORCH_COMPILE applied backend=%s", backend)
+    except Exception as exc:
+        logger.warning("TORCH_COMPILE failed backend=%s, staying eager: %s", backend, exc)
+        eager = getattr(runner, "_dlc_eager_model", None)
+        if eager is not None:
+            runner.model = eager
+
+
+def revert_runner_model_to_eager(dlc_live, exc: Exception) -> bool:
+    """Restore the un-compiled model after a compiled-inference failure.
+
+    Returns True if a compiled model was reverted (caller should retry eager), False
+    if there was nothing to revert (a genuine eager error -> let it propagate).
+    """
+    logger = logging.getLogger("dual_rt_dlc_live")
+    runner = getattr(dlc_live, "runner", None)
+    if runner is None:
+        return False
+    eager = getattr(runner, "_dlc_eager_model", None)
+    if eager is None or runner.model is eager:
+        return False
+    runner.model = eager
+    runner._dlc_eager_model = None
+    logger.warning("TORCH_COMPILE inference failed, reverted to eager: %s", exc)
+    return True
 
 
 def run_raw_inference(
@@ -810,8 +880,7 @@ def run_raw_inference(
     initialized: bool,
     packet: live.FramePacket,
 ) -> tuple[bool, np.ndarray, float, float]:
-    if packet.frame.ndim >= 2:
-        dlc_live.convert2rgb = True
+    dlc_live.convert2rgb = bool(getattr(config, "CONVERT_TO_RGB", True))
 
     preprocess_start = time.perf_counter()
     processed_frame = dlc_live.process_frame(packet.frame)
@@ -822,9 +891,15 @@ def run_raw_inference(
         dlc_live.pose = dlc_live.runner.init_inference(processed_frame)
         dlc_live.is_initialized = True
         initialized = True
-        print_model_device_after_init(dlc_live)
+        log_model_device_after_init(dlc_live)
+        maybe_compile_runner_model(dlc_live)
     else:
-        dlc_live.pose = dlc_live.runner.get_pose(processed_frame)
+        try:
+            dlc_live.pose = dlc_live.runner.get_pose(processed_frame)
+        except Exception as exc:
+            if not revert_runner_model_to_eager(dlc_live, exc):
+                raise
+            dlc_live.pose = dlc_live.runner.get_pose(processed_frame)
     model_end = time.perf_counter()
 
     pose = postprocess_pose_without_processor(dlc_live, np.asarray(dlc_live.pose))
@@ -998,8 +1073,7 @@ def run_batch_inference(
 
     runner = dlc_live.runner
     dlc_live.processor = None
-    if left_packet.frame.ndim >= 2 or right_packet.frame.ndim >= 2:
-        dlc_live.convert2rgb = True
+    dlc_live.convert2rgb = bool(getattr(config, "CONVERT_TO_RGB", True))
 
     start = time.perf_counter()
     preprocess_start = start
@@ -1283,6 +1357,7 @@ def make_writer(path: Path, frame: np.ndarray, fps: float) -> cv2.VideoWriter:
 
 
 def main() -> None:
+    live_profiles.apply_cli_profile(config, "dual", default_profile=None)
     validate_dual_config()
     logger = setup_dual_logger()
     configure_runtime_backends(logger)
@@ -1485,12 +1560,19 @@ def main() -> None:
             if pair_index % max(1, int(getattr(config, "DUAL_LOG_EVERY_N_PAIRS", 30))) == 0:
                 logger.info(
                     "pair=%d host_dt=%.2fms sdk_rel_dt=%s left_frame=%s right_frame=%s "
-                    "left_triplet=%s right_triplet=%s left_angle=%s right_angle=%s drops=%d/%d",
+                    "left_raw_visible=%d right_raw_visible=%d pose_post=%s "
+                    "left_p=%s right_p=%s left_triplet=%s right_triplet=%s "
+                    "left_angle=%s right_angle=%s drops=%d/%d",
                     pair_index,
                     host_dt_ms,
                     f"{camera_dt_ms:.2f}ms" if camera_dt_ms is not None else "n/a",
                     left_packet.source_frame_id,
                     right_packet.source_frame_id,
+                    int(left_result["raw_visible"]),
+                    int(right_result["raw_visible"]),
+                    "plugin" if fast_pose_only_enabled() else "python",
+                    pose_likelihood_summary(left_result),
+                    pose_likelihood_summary(right_result),
                     left_result["has_triplet"],
                     right_result["has_triplet"],
                     f"{float(left_result['hind_angle']):.1f}" if left_result["hind_angle"] is not None else "None",

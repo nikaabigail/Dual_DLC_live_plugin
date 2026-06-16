@@ -120,11 +120,20 @@ DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG = None
 # Optional CPU throttling. The measured working default leaves OpenCV/PyTorch
 # threadpools untouched for better result_hz. Set these to 1 only if CPU load is
 # more important than maximum throughput.
-DUAL_CV2_NUM_THREADS = -1
-DUAL_TORCH_NUM_THREADS = 0
-DUAL_TORCH_INTEROP_THREADS = 0
+DUAL_CV2_NUM_THREADS = 1
+DUAL_TORCH_NUM_THREADS = 12
+DUAL_TORCH_INTEROP_THREADS = 12
 DUAL_TORCH_CUDNN_BENCHMARK = True
-DUAL_TORCH_ALLOW_TF32 = False
+DUAL_TORCH_ALLOW_TF32 = True
+
+# torch.compile backend applied once to runner.model after init (single/sequential
+# inference path via run_raw_inference). Empty string = off (plain eager, default).
+# "cudagraphs" replays the identical eager kernels => bit-identical poses
+# (accuracy-neutral, safe for the closed-loop trigger) with lower per-frame overhead.
+# Any other backend (e.g. "inductor") changes kernels and MUST pass a pose/TTL
+# accuracy gate before stimulation use. On compile or compiled-inference failure the
+# runtime logs a warning and falls back to eager automatically.
+DUAL_TORCH_COMPILE_BACKEND = ""
 
 # In the normal plugin-driven mode Python sends only raw pose points. Filtering,
 # side selection, angle calculation, refractory logic and TTL generation are done
