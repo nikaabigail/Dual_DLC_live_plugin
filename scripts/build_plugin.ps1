@@ -31,7 +31,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$GuiRoot   = "C:\Users\Владимир\Desktop\plugin-GUI-main\plugin-GUI-main",
+  [string]$GuiRoot   = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'plugin-GUI-main\plugin-GUI-main'),
   [ValidateSet("Release","Debug")][string]$Config = "Release",
   [string]$DeployDir = "",
   [string]$VcVars    = ""
