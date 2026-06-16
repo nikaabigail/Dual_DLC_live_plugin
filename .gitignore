@@ -23,7 +23,8 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 
-# Keep the release DLL in dist, ignore other DLLs by default
+# Keep the distributable plugin DLLs in dist, ignore other DLLs by default
 *.dll
 !dist/windows-x64-debug/DualDLCLiveBridge.dll
+!dist/windows-x64-release/DualDLCLiveBridge.dll
 
