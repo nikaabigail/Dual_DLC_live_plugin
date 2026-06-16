@@ -12,6 +12,7 @@
 | --- | --- |
 | `README.md` | Общая схема, порядок выполнения, быстрый запуск, связь UDP/TTL. |
 | `docs/INSTALL_AND_RUN.md` | Установка с нуля: клонирование, драйвер, Python, venv, SDK, модель, плагин, запуск. |
+| `docs/BUILD_PLUGIN.md` | Сборка C++ плагина (Release), деплой на целевой OE и цикл обновления при правках. |
 | `python/README_OPEN_EPHYS_BRIDGE.md` | Подробно про Python runtime: камеры, DLCLive, binary fast-mode, profiler, логи. |
 | `open_ephys_plugin/DualDLCLiveBridge/README.md` | Подробно про C++ плагин Open Ephys: параметры, входные пакеты, фильтрация, TTL. |
 | `docs/README_DLC_live.md` | Старый single-camera `rt_dlc_live.py`, нужен для отладки одной камеры и модели. |
