@@ -84,9 +84,11 @@ $buildDir = Join-Path $GuiRoot "out\build\x64-$Config"
 $cmds = @(
   "call `"$vc`"",
   "cmake -S `"$GuiRoot`" -B `"$buildDir`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DOE_DONT_CHECK_BUILD_PATH=TRUE",
+  # the plugin links against open-ephys.lib, so the GUI target must be built first
+  "cmake --build `"$buildDir`" --target open-ephys",
   "cmake --build `"$buildDir`" --target DualDLCLiveBridge"
 ) -join " && "
-Write-Host "==> building (this can take a while on first Release configure)..."
+Write-Host "==> building GUI ($Config) then the plugin -- first Release build is LONG (compiles JUCE + the whole GUI)..."
 & cmd /c $cmds
 if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 
