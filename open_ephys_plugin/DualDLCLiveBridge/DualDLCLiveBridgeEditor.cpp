@@ -13,28 +13,36 @@ DualDLCLiveBridgeEditor::DualDLCLiveBridgeEditor (GenericProcessor* parentNode)
     : GenericEditor (parentNode),
       bridge (static_cast<DualDLCLiveBridge*> (parentNode))
 {
-    desiredWidth = 555;
+    // Compact 5-column x 3-row parameter grid so all 15 params AND the live
+    // status line fit inside the ~145px Open Ephys editor strip. The previous
+    // 3x5 layout pushed the bottom param row (y=155) and the status label
+    // (y=185) below the visible area, so they were clipped off-screen.
+    desiredWidth = 790;
 
-    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "enabled", 10, 35);
-    addTextBoxParameterEditor (Parameter::PROCESSOR_SCOPE, "udp_port", 10, 65);
-    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "angle_trigger_enabled", 10, 95);
-    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "angle_threshold_deg", 10, 125);
-    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "refractory_ms", 10, 155);
+    // Row 1 (y=32)
+    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "enabled", 10, 32);
+    addTextBoxParameterEditor (Parameter::PROCESSOR_SCOPE, "udp_port", 165, 32);
+    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "angle_trigger_enabled", 320, 32);
+    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "angle_threshold_deg", 475, 32);
+    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "refractory_ms", 630, 32);
 
-    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "use_filter", 190, 35);
-    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "enable_pcutoff", 190, 65);
-    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "conf_thresh_use", 190, 95);
-    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "conf_thresh_draw", 190, 125);
-    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "median_window", 190, 155);
+    // Row 2 (y=62)
+    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "use_filter", 10, 62);
+    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "enable_pcutoff", 165, 62);
+    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "conf_thresh_use", 320, 62);
+    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "conf_thresh_draw", 475, 62);
+    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "median_window", 630, 62);
 
-    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "enable_despike", 370, 35);
-    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "despike_threshold_px", 370, 65);
-    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "despike_reset_gap_frames", 370, 95);
-    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "enable_hold", 370, 125);
-    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "max_hold_frames", 370, 155);
+    // Row 3 (y=92)
+    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "enable_despike", 10, 92);
+    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "despike_threshold_px", 165, 92);
+    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "despike_reset_gap_frames", 320, 92);
+    addToggleParameterEditor (Parameter::PROCESSOR_SCOPE, "enable_hold", 475, 92);
+    addBoundedValueParameterEditor (Parameter::PROCESSOR_SCOPE, "max_hold_frames", 630, 92);
 
+    // Live status row (y=120) — now inside the visible editor area.
     statusLabel.setText ("pkts 0 | mode - | pair - | ttl 0x00 | L - | R - | q 0 | age -", dontSendNotification);
-    statusLabel.setBounds (10, 185, 535, 20);
+    statusLabel.setBounds (10, 120, 770, 18);
     statusLabel.setJustificationType (Justification::left);
     addAndMakeVisible (statusLabel);
 

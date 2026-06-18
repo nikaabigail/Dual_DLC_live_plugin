@@ -24,7 +24,7 @@ DUAL_CAMERAS = [
 DUAL_IMPORT_CONFIG = True
 DUAL_CONFIG_VERIFY = False
 DUAL_FALLBACK_APPLY_CONFIG = True
-DUAL_FORCE_TRIGGER_OFF = False
+DUAL_FORCE_TRIGGER_OFF = True  # BENCH/FREE-RUN (no Line2 trigger). SET BACK TO False FOR REAL TRIGGERED EXPERIMENTS.
 DUAL_FRAME_TIMEOUT_MS = 1000
 
 # Keep these on for live work: old frames are intentionally dropped.
@@ -59,6 +59,59 @@ DUAL_DEFAULT_CAMERA_SIDE = {
     "right": "right",
 }
 DUAL_USE_POINTS = sorted({point for points in DUAL_SIDE_POINT_SETS.values() for point in points})
+
+# Single-camera mode: one side camera sees only ONE hind leg at a time (the
+# rat's near flank), even though the model emits both hl_*_l and hl_*_r (the
+# occluded leg is a low-confidence guess). SINGLE_AUTO_PICK_SIDE (default) routes
+# the pose to whichever side's triplet is actually present, so the plugin reports
+# exactly the visible leg — L when the left flank shows, R when the rat turns and
+# the right flank shows. Set False to force the fixed SINGLE_PLUGIN_SIDE.
+SINGLE_AUTO_PICK_SIDE = True
+# Opt-in only for a camera that genuinely sees BOTH legs at once (e.g. a top or
+# rear view): feed the full pose to both packet sides so the plugin reports L and
+# R simultaneously. WRONG for a single side camera (it would report both legs
+# from one visible flank, as L==R).
+SINGLE_EMIT_BOTH_LEGS = False
+
+# --- Dynamic leg ROI (single-camera) -----------------------------------------
+# A fixed-WIDTH sliding window that follows the hind legs, so DLCLive runs on a
+# small crop (default 448 px wide, full stripe height) instead of the whole
+# 1920 px frame -> faster inference and lower closed-loop latency. Fixed size
+# keeps cudagraphs working (constant input shape); we crop (not resize) so the
+# leg scale is unchanged and accuracy is preserved.
+#   - Window centre = mean X of whatever hind-leg points are visible (>=THRESH).
+#     Works with 3, 2, or even 1 point, EMA-smoothed -> a 1-point dropout does
+#     NOT move/widen the window.
+#   - The crop is ALWAYS a fixed width (never the full frame). On loss the window
+#     first HOLDS at the last leg position for LEG_ROI_HOLD_FRAMES frames (~1 s):
+#     a turn or side-switch makes the legs vanish briefly then reappear near the
+#     same X, so holding re-locks instantly instead of thrashing into a scan.
+#     Only after that hold does it SWEEP the window across the frame to re-acquire
+#     (covers the stripe in ~fw/width frames). Keeping the input shape constant is
+#     required so cudagraphs / torch.compile stay valid -- a full-frame fallback
+#     would flip the shape (256<->1920) and force a revert to ~2x slower eager.
+# Assumes base CROPPING is None (the camera already hardware-crops to the stripe).
+LEG_ROI_ENABLED = True
+LEG_ROI_WIDTH = 256            # px, fixed window width
+LEG_ROI_DETECT_THRESH = 0.30   # min likelihood for a hind-leg point to anchor the centre
+LEG_ROI_HOLD_FRAMES = 100      # ~1 s @100fps: HOLD at the last leg position this long (rides out turns/
+                               # occlusions where legs vanish then reappear near the same X) before sweeping
+LEG_ROI_CENTER_EMA = 0.35      # window-centre smoothing (0..1; higher = follows faster)
+
+
+# --- Parallel recording (single-camera): raw video + keypoints ---------------
+# Records the RAW camera video (no overlay) and/or the per-frame keypoints in a
+# background thread, so it does NOT add latency to the camera->pose->UDP loop.
+# Keypoints are FULL-FRAME coords (the sliding-ROI offset is already restored);
+# the ROI window [x1,x2] the model saw is stored per frame too, so crop-local
+# coords for fine-tuning are just (x - roi_x1). Files share a timestamped stem.
+SINGLE_RECORD_ENABLED = True           # master switch
+SINGLE_RECORD_DIR = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\recordings")
+SINGLE_RECORD_VIDEO = True              # write the raw camera video (no points)
+SINGLE_RECORD_VIDEO_CODEC = "mp4v"      # fourcc; "FFV1"=lossless (bigger/slower, best for re-labeling)
+SINGLE_RECORD_KEYPOINTS = True          # write per-frame keypoints (full-frame coords)
+SINGLE_KP_FORMAT = "csv"             # "binary" (fast .dlckp + scripts/kp_to_csv.py) or "csv"
+SINGLE_RECORD_QUEUE = 128               # frames buffered to the writer thread before dropping
 
 
 # ============================================================================

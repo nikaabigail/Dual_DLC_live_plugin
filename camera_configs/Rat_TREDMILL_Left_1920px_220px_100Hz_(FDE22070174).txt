@@ -25,7 +25,7 @@ Height	220
 RegionSelector	Region0
 ChunkModeActive	0
 ChunkEnable	0
-ExposureTime	4000
+ExposureTime	8000
 AcquisitionFrameRateMode	On
 AcquisitionFrameRate	100
 RegionSelector	Region0
@@ -99,7 +99,7 @@ UserOutputSelector	UserOutput2
 UserOutputValue	0
 UserOutputSelector	UserOutput0
 GainSelector	AnalogAll
-Gain	10
+Gain	24
 GainSelector	AnalogAll
 GainSelector	AnalogAll
 GainAuto	Off

@@ -1,15 +1,20 @@
 """
 Single-camera DLCLive runtime that feeds the DualDLCLiveBridge Open Ephys plugin.
 
-The plugin packet format remains the dual DDLP/v1 binary packet. The active
-camera side is filled with real pose points; the inactive side is filled with
-NaN points so the plugin keeps the corresponding TTL lines low.
+The plugin packet format remains the dual DDLP/v1 binary packet. A single side
+camera sees only one hind leg at a time, so by default (SINGLE_AUTO_PICK_SIDE)
+the pose is routed to whichever side's triplet is actually present: the plugin
+reports the visible leg only — L when the left flank shows, R when the rat turns
+and the right flank shows. Set SINGLE_AUTO_PICK_SIDE=False to pin
+SINGLE_PLUGIN_SIDE, or SINGLE_EMIT_BOTH_LEGS=True only for a camera that
+genuinely sees both legs at once (top/rear view).
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -19,14 +24,107 @@ import numpy as np
 import config_dual_rt_dlc_live as config
 import dual_rt_dlc_live as dual
 import live_profiles
+import live_recorder
 import rt_dlc_live as live
 
 
 live.config = config
 
+_OVERLAY_EMA_ALPHA = 0.12
+
+
+def _ema(prev: Optional[float], value: float, alpha: float = _OVERLAY_EMA_ALPHA) -> float:
+    return value if prev is None else (alpha * value + (1.0 - alpha) * prev)
+
 
 class NullSource:
     dropped_total = 0
+
+
+class LegRoiTracker:
+    """Fixed-width sliding ROI that follows the hind legs (single camera).
+
+    Drives DLCLive's ``cropping`` so inference runs on a small, constant-size
+    crop instead of the full stripe. The window centre is the mean X of whatever
+    hind-leg points are currently visible (>= ``detect_thresh``), so it is robust
+    to a 1-2 point dropout, and EMA-smoothed so it does not jitter. On loss the
+    window HOLDS at the last position for ``hold_frames`` frames (~1 s) -- riding
+    out turns/occlusions where legs vanish then reappear near the same X -- and
+    only then SWEEPS the fixed-size window across the frame to re-acquire. The
+    width is always constant (never the full frame) so cudagraphs/torch.compile
+    stay valid.
+    Coordinates returned by DLCLive are already restored to the full
+    frame (``postprocess_pose_without_processor`` adds the crop offset back), so
+    everything downstream (pose_result, side auto-pick, plugin) is unchanged.
+    """
+
+    def __init__(
+        self,
+        frame_w: int,
+        frame_h: int,
+        leg_indices: list[int],
+        width: int,
+        detect_thresh: float,
+        hold_frames: int,
+        center_ema: float,
+    ) -> None:
+        self.fw = int(frame_w)
+        self.fh = int(frame_h)
+        self.leg_idx = list(leg_indices)
+        self.width = max(16, min(int(width), self.fw))
+        self.thresh = float(detect_thresh)
+        self.hold_frames = int(hold_frames)
+        self.ema = float(center_ema)
+        # Start (and re-acquire) CENTRED, never full-frame. The crop is always a
+        # FIXED width, so the model input shape never changes and cudagraphs /
+        # torch.compile stay valid. A full-frame fallback would flip the shape
+        # 256<->1920 and force a revert to slow eager inference (~2x slower).
+        self.cx: Optional[float] = self.fw / 2.0
+        self.misses = 0
+
+    def window(self) -> Optional[list[int]]:
+        """ROI [x1, x2, y1, y2] for the next frame (fixed width, always engaged)."""
+        if self.cx is None:
+            return None
+        half = self.width // 2
+        x1 = int(round(self.cx)) - half
+        x1 = max(0, min(x1, self.fw - self.width))
+        return [x1, x1 + self.width, 0, self.fh]
+
+    def update(self, pose: np.ndarray) -> None:
+        """Update the window centre from a full-frame pose."""
+        if not self.leg_idx:
+            return
+        pts = np.asarray(pose)[self.leg_idx]
+        visible = pts[pts[:, 2] >= self.thresh]
+        if len(visible) >= 1:
+            cx_new = float(np.mean(visible[:, 0]))
+            # Snap straight onto the legs when (re)acquiring (cx unset, or we were
+            # mid-sweep / just lost); EMA-smooth only during continuous tracking.
+            # Otherwise coming out of a sweep the window would lag behind the
+            # animal and immediately lose it again.
+            if self.cx is None or self.misses > 0:
+                self.cx = cx_new
+            else:
+                self.cx = self.ema * cx_new + (1.0 - self.ema) * self.cx
+            self.misses = 0
+        else:
+            self.misses += 1
+            if self.misses <= self.hold_frames:
+                # HOLD at the last leg position (~1 s). A turn or side-switch makes
+                # the legs vanish for a moment then reappear near the SAME X, so
+                # staying put re-locks instantly instead of thrashing. cx is left
+                # untouched -> the window does not move during the hold.
+                pass
+            else:
+                # Only after a sustained loss -> SWEEP the fixed-size window across
+                # the frame to re-acquire (the animal may have moved elsewhere).
+                # One window per frame (wrap at the right edge) covers the stripe in
+                # ~fw/width frames. Width stays constant -> cudagraphs stays valid
+                # (never a full-frame scan); misses is NOT reset so it keeps sweeping.
+                self.cx = (self.cx or self.width / 2.0) + self.width
+                if self.cx > self.fw:
+                    self.cx = self.width / 2.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -104,15 +202,63 @@ def make_dummy_runtime(name: str) -> dual.CameraRuntime:
     )
 
 
+def _triplet_min_confidence(pose_result: dict[str, object], side: str) -> float:
+    """Lowest likelihood among a side's hind-leg triplet (missing point -> 0).
+
+    The plugin only reports a side when all three of its points are present, so
+    the side with the higher minimum is the one whose triplet is most complete,
+    i.e. the leg this single camera is actually looking at.
+    """
+    arr = pose_result.get("raw_pose_array")
+    names = list(config.DUAL_USE_POINTS)
+    points = [p for p in config.DUAL_SIDE_POINT_SETS.get(side, ()) if p in names]
+    if not isinstance(arr, np.ndarray) or arr.shape[0] != len(names) or not points:
+        return -1.0
+    values = []
+    for name in points:
+        value = float(arr[names.index(name), 2])
+        values.append(value if np.isfinite(value) else 0.0)
+    return min(values) if values else -1.0
+
+
 def make_pair_result(
     frame_index: int,
     packet: live.FramePacket,
     pose_result: dict[str, object],
     plugin_side: str,
 ) -> dual.PairInferenceResult:
+    # A single side camera sees only ONE hind leg at a time (the rat's near
+    # flank). The model still emits both hl_*_l and hl_*_r, but the occluded leg
+    # is a low-confidence guess, so we must NOT report both. By default we auto-
+    # pick the side whose triplet is actually present (the visible leg) and route
+    # the pose only there: the plugin reports exactly one leg — L when the left
+    # flank shows, R when the rat turns and the right flank shows. The opposite
+    # side stays empty so its TTL line stays low.
+    if bool(getattr(config, "SINGLE_EMIT_BOTH_LEGS", False)):
+        # Opt-in: a camera that truly sees both legs (top/rear view). Reports
+        # L and R at once from the same pose.
+        return dual.PairInferenceResult(
+            pair_index=frame_index,
+            left_packet=packet,
+            right_packet=packet,
+            host_dt_ms=0.0,
+            camera_dt_ms=None,
+            left_result=pose_result,
+            right_result=pose_result,
+        )
+
+    target_side = plugin_side
+    if bool(getattr(config, "SINGLE_AUTO_PICK_SIDE", True)):
+        target_side = (
+            "right"
+            if _triplet_min_confidence(pose_result, "right")
+            > _triplet_min_confidence(pose_result, "left")
+            else "left"
+        )
+
     dummy_packet = make_dummy_packet(packet)
     empty_result = make_empty_result()
-    if plugin_side == "left":
+    if target_side == "left":
         return dual.PairInferenceResult(
             pair_index=frame_index,
             left_packet=packet,
@@ -170,6 +316,7 @@ def main(argv: list[str] | None = None) -> None:
 
     source = runtime.source
     dlc_live = None
+    recorder = None
     profiler = dual.StageProfiler(
         enabled=bool(getattr(config, "DUAL_ENABLE_STAGE_PROFILER", True)),
         alpha=float(getattr(config, "DUAL_PROFILE_EMA_ALPHA", 0.10)),
@@ -231,6 +378,44 @@ def main(argv: list[str] | None = None) -> None:
         )
         logger.info("Model bodyparts loaded: %d; bridge points=%s", len(body_parts), config.DUAL_USE_POINTS)
 
+        base_cropping = effective_cropping
+        roi_tracker: Optional[LegRoiTracker] = None
+        if bool(getattr(config, "LEG_ROI_ENABLED", False)):
+            if base_cropping is not None:
+                logger.warning("LEG_ROI_ENABLED ignores a non-None base CROPPING; window uses camera-frame coords.")
+            leg_indices = [i for i, name in enumerate(body_parts) if str(name).startswith("hl_")]
+            frame_h, frame_w = packet.frame.shape[0], packet.frame.shape[1]
+            roi_tracker = LegRoiTracker(
+                frame_w=frame_w,
+                frame_h=frame_h,
+                leg_indices=leg_indices,
+                width=int(getattr(config, "LEG_ROI_WIDTH", 448)),
+                detect_thresh=float(getattr(config, "LEG_ROI_DETECT_THRESH", 0.30)),
+                hold_frames=int(getattr(config, "LEG_ROI_HOLD_FRAMES", 100)),
+                center_ema=float(getattr(config, "LEG_ROI_CENTER_EMA", 0.35)),
+            )
+            logger.info(
+                "Leg ROI enabled: width=%d/%d thresh=%.2f hold_frames=%d ema=%.2f hind_points=%d",
+                roi_tracker.width, frame_w, roi_tracker.thresh, roi_tracker.hold_frames, roi_tracker.ema, len(leg_indices),
+            )
+
+        recorder: Optional[live_recorder.ParallelRecorder] = None
+        if bool(getattr(config, "SINGLE_RECORD_ENABLED", False)):
+            recorder = live_recorder.ParallelRecorder(
+                out_dir=getattr(config, "SINGLE_RECORD_DIR", Path("recordings")),
+                stem="single_" + datetime.now().strftime("%Y%m%d_%H%M%S"),
+                bodyparts=body_parts,
+                fps=source.nominal_fps(),
+                frame_is_rgb=str(getattr(config, "GALAXY_OUTPUT_COLOR", "bgr")).strip().lower() == "rgb",
+                record_video=bool(getattr(config, "SINGLE_RECORD_VIDEO", True)),
+                video_codec=str(getattr(config, "SINGLE_RECORD_VIDEO_CODEC", "mp4v")),
+                record_keypoints=bool(getattr(config, "SINGLE_RECORD_KEYPOINTS", True)),
+                kp_format=str(getattr(config, "SINGLE_KP_FORMAT", "binary")),
+                queue_size=int(getattr(config, "SINGLE_RECORD_QUEUE", 128)),
+                logger=logger,
+            )
+            recorder.start()
+
         while packet is not None:
             frame_index = int(stats["frames"]) + 1
             stats["frames"] = float(frame_index)
@@ -240,9 +425,15 @@ def main(argv: list[str] | None = None) -> None:
                     stats["cam_fps"] = 1.0 / dt_cam
             prev_capture_ts = float(packet.capture_ts)
 
+            if roi_tracker is not None:
+                window = roi_tracker.window()
+                dlc_live.cropping = window if window is not None else base_cropping
             infer_start = time.perf_counter()
             initialized, pose, preprocess_ms, model_infer_ms = dual.run_raw_inference(dlc_live, initialized, packet)
             infer_ms = (time.perf_counter() - infer_start) * 1000.0
+            stats["infer_ms_ema"] = _ema(stats.get("infer_ms_ema"), infer_ms)
+            if roi_tracker is not None:
+                roi_tracker.update(pose)
             infer_end = time.perf_counter()
             profiler.observe("preprocess", preprocess_ms)
             profiler.observe("inference", model_infer_ms)
@@ -250,6 +441,7 @@ def main(argv: list[str] | None = None) -> None:
                 dt_inf = infer_end - prev_infer_end
                 if dt_inf > 0:
                     stats["infer_fps"] = 1.0 / dt_inf
+                    stats["result_hz_ema"] = _ema(stats.get("result_hz_ema"), stats["infer_fps"])
             prev_infer_end = infer_end
             stats["infer_ms_sum"] += infer_ms
 
@@ -273,21 +465,40 @@ def main(argv: list[str] | None = None) -> None:
             bridge.send(pair_result, left_runtime, right_runtime)
             profiler.observe("pack/send", (time.perf_counter() - pack_start) * 1000.0)
 
+            if recorder is not None:
+                # raw frame + full-frame pose (+ the ROI window the model saw) ->
+                # background thread; hot loop only copies + enqueues.
+                recorder.submit(
+                    packet.frame, frame_index, float(packet.capture_ts),
+                    pose, window if roi_tracker is not None else None,
+                )
+
             display_start = time.perf_counter()
             if visual_mode:
                 display = dual.frame_for_opencv_display(packet.frame).copy()
                 metrics = {
-                    "cam_fps": stats.get("cam_fps", 0.0),
-                    "infer_fps": stats.get("infer_fps", 0.0),
-                    "infer_ms": infer_ms,
+                    # throughput (results/s) and latency (ms), both EMA-smoothed
+                    "result_hz": stats.get("result_hz_ema", 0.0),
+                    "infer_ms_ema": stats.get("infer_ms_ema", infer_ms),
+                    "infer_ms": infer_ms,  # raw fallback
                     "raw_visible": int(pose_result["raw_visible"]),
-                    "filtered_visible": int(pose_result["raw_visible"]),
                     "tracked_points": len(config.DUAL_USE_POINTS),
-                    "triplet": False,
-                    "hind_angle": None,
                     "source_drops": getattr(source, "dropped_total", 0),
                 }
                 display = live.draw_overlay(display, dual.draw_points_for_result(pose_result), metrics)
+                if roi_tracker is not None:
+                    if window is not None:
+                        x1, x2, y1, y2 = window
+                        cv2.rectangle(display, (x1, y1), (max(x1, x2 - 1), max(y1, y2 - 1)), (0, 255, 255), 2)
+                        cv2.putText(
+                            display, f"ROI {x2 - x1}px", (min(x1 + 5, max(0, display.shape[1] - 95)), y1 + 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1, cv2.LINE_AA,
+                        )
+                    else:
+                        cv2.putText(
+                            display, "ROI: full frame (re-acquiring)", (5, 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1, cv2.LINE_AA,
+                        )
                 cv2.imshow(str(getattr(config, "SINGLE_WINDOW_NAME", "DLC Live single bridge")), display)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (27, ord("q")):
@@ -345,6 +556,11 @@ def main(argv: list[str] | None = None) -> None:
             source.release()
         finally:
             bridge.close()
+        if recorder is not None:
+            try:
+                recorder.close()  # drain the queue + flush/close the files
+            except Exception:
+                pass
         if dlc_live is not None:
             try:
                 dlc_live.close()

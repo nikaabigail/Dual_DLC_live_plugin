@@ -995,27 +995,30 @@ def draw_overlay(
 
     lines: list[str] = []
     if config.DRAW_FPS:
-        lines.append(
-            "cam {cam_fps:.1f}  live {infer_fps:.1f}  inf {infer_ms:.1f}ms".format(
-                cam_fps=float(metrics.get("cam_fps", 0.0) or 0.0),
-                infer_fps=float(metrics.get("infer_fps", 0.0) or 0.0),
-                infer_ms=float(metrics.get("infer_ms", 0.0) or 0.0),
-            )
-        )
+        # Pipeline THROUGHPUT (Hz, poses/sec actually sent to the plugin) and the
+        # inference LATENCY (ms). Both EMA-smoothed; different quantities, so no
+        # fps-vs-ms duplication.
+        hz = metrics.get("result_hz")
+        if hz is None:
+            hz = metrics.get("infer_fps", 0.0)
+        ms = metrics.get("infer_ms_ema")
+        if ms is None:
+            ms = metrics.get("infer_ms", 0.0)
+        lines.append(f"DLC {float(hz or 0.0):.0f} Hz   infer {float(ms or 0.0):.1f} ms")
     angle = metrics.get("hind_angle")
     if angle is not None:
         lines.append(f"Hind angle: {float(angle):.1f}")
     if config.DEBUG_OVERLAY:
-        lines.append(
-            "raw {raw_visible}/{tracked_points}  filt {filtered_visible}/{tracked_points}  "
-            "triplet {triplet}  drops {source_drops}".format(
-                raw_visible=int(metrics.get("raw_visible", 0) or 0),
-                filtered_visible=int(metrics.get("filtered_visible", 0) or 0),
-                tracked_points=int(metrics.get("tracked_points", 0) or 0),
-                triplet="yes" if bool(metrics.get("triplet", False)) else "no",
-                source_drops=int(metrics.get("source_drops", 0) or 0),
-            )
-        )
+        parts: list[str] = []
+        n = int(metrics.get("tracked_points", 0) or 0)
+        parts.append(f"raw {int(metrics.get('raw_visible', 0) or 0)}/{n}")
+        filt = metrics.get("filtered_visible")
+        if filt is not None and int(filt) != int(metrics.get("raw_visible", 0) or 0):
+            parts.append(f"filt {int(filt)}/{n}")  # only when filtering actually changed it
+        if "triplet" in metrics:
+            parts.append("triplet yes" if bool(metrics.get("triplet")) else "triplet no")
+        parts.append(f"drops {int(metrics.get('source_drops', 0) or 0)}")
+        lines.append("   ".join(parts))
 
     y = 24
     for line in lines:
