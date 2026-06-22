@@ -24,7 +24,7 @@ DUAL_CAMERAS = [
 DUAL_IMPORT_CONFIG = True
 DUAL_CONFIG_VERIFY = False
 DUAL_FALLBACK_APPLY_CONFIG = True
-DUAL_FORCE_TRIGGER_OFF = True  # BENCH/FREE-RUN (no Line2 trigger). SET BACK TO False FOR REAL TRIGGERED EXPERIMENTS.
+DUAL_FORCE_TRIGGER_OFF = False  # Real experiments respect the camera .txt Line2 trigger. Set True only for bench/free-run.
 DUAL_FRAME_TIMEOUT_MS = 1000
 
 # Keep these on for live work: old frames are intentionally dropped.
@@ -108,10 +108,16 @@ LEG_ROI_CENTER_EMA = 0.35      # window-centre smoothing (0..1; higher = follows
 SINGLE_RECORD_ENABLED = True           # master switch
 SINGLE_RECORD_DIR = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation\recordings")
 SINGLE_RECORD_VIDEO = True              # write the raw camera video (no points)
-SINGLE_RECORD_VIDEO_CODEC = "mp4v"      # fourcc; "FFV1"=lossless (bigger/slower, best for re-labeling)
+SINGLE_RECORD_VIDEO_CODEC = "FFV1"      # fourcc; FFV1=lossless .avi (best for DLC re-labeling). "MJPG"=lighter/lossy.
+                                        # The recorder auto-selects the .avi extension for FFV1/MJPG/XVID.
 SINGLE_RECORD_KEYPOINTS = True          # write per-frame keypoints (full-frame coords)
 SINGLE_KP_FORMAT = "csv"             # "binary" (fast .dlckp + scripts/kp_to_csv.py) or "csv"
 SINGLE_RECORD_QUEUE = 128               # frames buffered to the writer thread before dropping
+
+# Dual-camera recording: writes BOTH cameras (two files each, dual_<ts>_left.* and
+# dual_<ts>_right.*), each on its own background thread. Reuses the SINGLE_RECORD_*
+# params above (dir, video on/off, codec, keypoints on/off, format, queue).
+DUAL_RECORD_ENABLED = True
 
 
 # ============================================================================
@@ -120,7 +126,7 @@ SINGLE_RECORD_QUEUE = 128               # frames buffered to the writer thread b
 DUAL_WINDOW_NAME = "DLC Live dual Galaxy"
 # Working stimulation mode should not draw OpenCV windows: display/resize/overlay
 # can add tens of milliseconds per pair and does not affect UDP pose output.
-DUAL_DISPLAY_WINDOW = False
+DUAL_DISPLAY_WINDOW = False  # Stimulation runs draw no OpenCV windows. Set True only for setup/debug (two overlays).
 DUAL_SHOW_SCALE = 0.5
 DUAL_PROCESS_EVERY_N_PAIRS = 1
 DUAL_PAIR_WAIT_TIMEOUT_MS = 2000

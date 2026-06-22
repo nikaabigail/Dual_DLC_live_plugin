@@ -187,6 +187,118 @@ void DualDLCLiveBridge::registerParameters()
                      0,
                      60000,
                      false);
+
+    // --- Physiological validity gates -----------------------------------------
+    // These only SUPPRESS the hind-angle trigger (TTL lines 2/3) for a frame whose
+    // pose is physiologically implausible; they never affect the triplet-present
+    // lines (0/1) and never fabricate a trigger. Defaults are loose hard ceilings
+    // (catch teleports / mis-detections, not real gait) and were derived from
+    // Varejao 2002 + the empirical left-leg CSV -- re-validate on a live-rat
+    // recording before tightening. Off by toggling enable_validity_gates.
+    addBooleanParameter (Parameter::PROCESSOR_SCOPE,
+                         "enable_validity_gates",
+                         "Validity",
+                         "Master switch for the physiological validity gates (angle band, angle rate, displacement)",
+                         true,
+                         false);
+
+    addBooleanParameter (Parameter::PROCESSOR_SCOPE,
+                         "enable_angle_plausibility",
+                         "Angle band",
+                         "Suppress the hind-angle trigger when the angle is physiologically implausible",
+                         true,
+                         false);
+
+    addFloatParameter (Parameter::PROCESSOR_SCOPE,
+                       "angle_min_deg",
+                       "Angle min",
+                       "Hard-reject the hind angle below this (also covers near-collinearity)",
+                       "deg",
+                       30.0f,
+                       0.0f,
+                       180.0f,
+                       0.5f,
+                       false);
+
+    addFloatParameter (Parameter::PROCESSOR_SCOPE,
+                       "angle_max_deg",
+                       "Angle max",
+                       "Hard-reject the hind angle above this (collinear / ill-conditioned)",
+                       "deg",
+                       170.0f,
+                       0.0f,
+                       180.0f,
+                       0.5f,
+                       false);
+
+    addBooleanParameter (Parameter::PROCESSOR_SCOPE,
+                         "enable_angle_delta",
+                         "Angle rate",
+                         "Suppress the hind-angle trigger on an impossible per-frame angle change",
+                         true,
+                         false);
+
+    addFloatParameter (Parameter::PROCESSOR_SCOPE,
+                       "angle_max_delta_deg",
+                       "Angle d/frame",
+                       "Hard-reject when the angle changes by at least this much between consecutive accepted frames",
+                       "deg",
+                       25.0f,
+                       0.0f,
+                       180.0f,
+                       0.5f,
+                       false);
+
+    addBooleanParameter (Parameter::PROCESSOR_SCOPE,
+                         "enable_disp_segment",
+                         "Disp gate",
+                         "Suppress the hind-angle trigger when a keypoint jumps more than a fraction of the hip-ankle segment",
+                         true,
+                         false);
+
+    addFloatParameter (Parameter::PROCESSOR_SCOPE,
+                       "disp_frac_toe",
+                       "Toe frac",
+                       "Max toe per-frame jump as a fraction of the previous hip-ankle segment",
+                       "xS",
+                       1.0f,
+                       0.05f,
+                       5.0f,
+                       0.05f,
+                       false);
+
+    addFloatParameter (Parameter::PROCESSOR_SCOPE,
+                       "disp_frac_ankle",
+                       "Ankle frac",
+                       "Max ankle per-frame jump as a fraction of the previous hip-ankle segment",
+                       "xS",
+                       0.5f,
+                       0.05f,
+                       5.0f,
+                       0.05f,
+                       false);
+
+    addFloatParameter (Parameter::PROCESSOR_SCOPE,
+                       "disp_frac_hip",
+                       "Hip frac",
+                       "Max hip per-frame jump as a fraction of the previous hip-ankle segment",
+                       "xS",
+                       0.3f,
+                       0.05f,
+                       5.0f,
+                       0.05f,
+                       false);
+
+    addFloatParameter (Parameter::PROCESSOR_SCOPE,
+                       "disp_seg_min_px",
+                       "Seg min px",
+                       "Min plausible hip-ankle length; below this the displacement gate falls back to despike_threshold_px",
+                       "px",
+                       30.0f,
+                       1.0f,
+                       500.0f,
+                       1.0f,
+                       false);
 }
 
 AudioProcessorEditor* DualDLCLiveBridge::createEditor()
@@ -220,7 +332,18 @@ void DualDLCLiveBridge::parameterValueChanged (Parameter* param)
         || name.equalsIgnoreCase ("despike_reset_gap_frames")
         || name.equalsIgnoreCase ("median_window")
         || name.equalsIgnoreCase ("enable_hold")
-        || name.equalsIgnoreCase ("max_hold_frames"))
+        || name.equalsIgnoreCase ("max_hold_frames")
+        || name.equalsIgnoreCase ("enable_validity_gates")
+        || name.equalsIgnoreCase ("enable_angle_plausibility")
+        || name.equalsIgnoreCase ("angle_min_deg")
+        || name.equalsIgnoreCase ("angle_max_deg")
+        || name.equalsIgnoreCase ("enable_angle_delta")
+        || name.equalsIgnoreCase ("angle_max_delta_deg")
+        || name.equalsIgnoreCase ("enable_disp_segment")
+        || name.equalsIgnoreCase ("disp_frac_toe")
+        || name.equalsIgnoreCase ("disp_frac_ankle")
+        || name.equalsIgnoreCase ("disp_frac_hip")
+        || name.equalsIgnoreCase ("disp_seg_min_px"))
     {
         resetPoseFilters();
     }
@@ -810,7 +933,122 @@ DualDLCLiveBridge::SidePoseResult DualDLCLiveBridge::evaluateSidePosePoints (con
     if (result.hasTriplet)
         result.hasAngle = safeAngleDeg (hip, ankle, toes, result.angleDeg);
 
+    // Key the validity state by CAMERA, not by the picked leg: each capture stream has
+    // its own monotonic frameId, so the two cameras must never share one state object
+    // (a camera that picks the contralateral leg would otherwise alias the other
+    // camera's history and compare across unrelated frame counters). lastSide (below)
+    // still re-anchors when the picked leg flips L<->R within this one camera.
+    SideValidityState& validity = (cameraName == "right") ? rightValidity : leftValidity;
+    applyValidityGates (result, validity, hip, ankle, toes, frameId);
+
     return result;
+}
+
+void DualDLCLiveBridge::applyValidityGates (SidePoseResult& result,
+                                            SideValidityState& validity,
+                                            const PosePoint& hip,
+                                            const PosePoint& ankle,
+                                            const PosePoint& toes,
+                                            int64 frameId)
+{
+    // The validity gates protect the closed-loop angle trigger. Each one can only
+    // SUPPRESS result.hasAngle for the current frame (TTL lines 2/3), never fabricate
+    // a trigger, and never touches the triplet-present lines (0/1). The geometry here
+    // is the median-filtered pose, so displacement is measured median-to-median
+    // (smoother, lags ~1 frame) -- intentional, on top of the raw-to-raw px despike
+    // already done per point in filterPoint.
+    const bool gatesOn = getBoolParam ("enable_validity_gates", true);
+
+    if (! result.hasTriplet)
+        return;  // no points -> nothing to anchor or gate; gap grows -> re-anchor later
+
+    const int64 gap = frameId - validity.lastFrameId;
+    const bool sameSide = validity.hasLast && validity.lastSide == result.pickedSide;
+    // Truly-consecutive = same leg AND the immediately preceding frame was also an
+    // accepted triplet (gap == 1). Any larger gap (dropped / low-confidence frames in
+    // between, or first frame / leg flip) re-anchors: the absolute angle band below
+    // still applies, but the per-frame delta/displacement caps are skipped so a
+    // legitimate multi-frame re-acquisition is not judged with a single-frame
+    // threshold (the allowed rate would otherwise be divided by the gap).
+    const bool consecutive = sameSide && gap == 1;
+
+    bool dispRejected = false;
+
+    if (gatesOn)
+    {
+        // 1) Absolute angle plausibility band (every frame, even after a gap).
+        if (result.hasAngle && getBoolParam ("enable_angle_plausibility", true))
+        {
+            const double angleMin = (double) getFloatParam ("angle_min_deg", 30.0f);
+            const double angleMax = (double) getFloatParam ("angle_max_deg", 170.0f);
+            if (result.angleDeg < angleMin || result.angleDeg > angleMax)
+                result.hasAngle = false;
+        }
+
+        // 2) Per-frame angle-change cap (same leg, consecutive accepted frames only).
+        if (result.hasAngle
+            && getBoolParam ("enable_angle_delta", true)
+            && consecutive
+            && validity.hasLastAngle
+            && frameId - validity.lastAngleFrameId == 1)  // last angle is from the immediately preceding frame
+        {
+            const double maxDelta = (double) getFloatParam ("angle_max_delta_deg", 25.0f);
+            if (std::abs (result.angleDeg - validity.lastAngleDeg) >= maxDelta)
+                result.hasAngle = false;
+        }
+
+        // 3) Per-keypoint displacement cap as a fraction of the PREVIOUS-frame hip-ankle
+        //    segment (scale-invariant). Using the previous-frame segment avoids the ankle
+        //    self-reference: a teleported ankle cannot inflate the ruler it is judged by.
+        if (result.hasAngle
+            && getBoolParam ("enable_disp_segment", true)
+            && consecutive)
+        {
+            const double prevSeg = validity.lastSegLen;
+            const double segFloor = (double) getFloatParam ("disp_seg_min_px", 30.0f);
+            const double dHip = std::hypot (hip.x - validity.lastHipX, hip.y - validity.lastHipY);
+            const double dAnkle = std::hypot (ankle.x - validity.lastAnkleX, ankle.y - validity.lastAnkleY);
+            const double dToes = std::hypot (toes.x - validity.lastToesX, toes.y - validity.lastToesY);
+
+            if (prevSeg >= segFloor)
+            {
+                const double capHip = (double) getFloatParam ("disp_frac_hip", 0.3f) * prevSeg;
+                const double capAnkle = (double) getFloatParam ("disp_frac_ankle", 0.5f) * prevSeg;
+                const double capToes = (double) getFloatParam ("disp_frac_toe", 1.0f) * prevSeg;
+                dispRejected = dHip > capHip || dAnkle > capAnkle || dToes > capToes;
+            }
+            else
+            {
+                // Degenerate / foreshortened segment: %-of-segment is unreliable, fall
+                // back to the absolute despike pixel cap for every keypoint.
+                const double pxCap = (double) getFloatParam ("despike_threshold_px", 150.0f);
+                dispRejected = dHip > pxCap || dAnkle > pxCap || dToes > pxCap;
+            }
+            if (dispRejected)
+                result.hasAngle = false;
+        }
+    }
+
+    // Re-anchor the validity state. Position advances whenever the triplet is present
+    // and was NOT a rejected teleport, so the next frame keeps a reference even after a
+    // suppressed angle and never anchors onto a jump. The angle reference advances only
+    // when the angle survived every gate.
+    if (! dispRejected)
+    {
+        validity.hasLast = true;
+        validity.lastFrameId = frameId;
+        validity.lastSide = result.pickedSide;
+        validity.lastHipX = hip.x;     validity.lastHipY = hip.y;
+        validity.lastAnkleX = ankle.x; validity.lastAnkleY = ankle.y;
+        validity.lastToesX = toes.x;   validity.lastToesY = toes.y;
+        validity.lastSegLen = std::hypot (hip.x - ankle.x, hip.y - ankle.y);
+    }
+    if (result.hasAngle)
+    {
+        validity.hasLastAngle = true;
+        validity.lastAngleDeg = result.angleDeg;
+        validity.lastAngleFrameId = frameId;
+    }
 }
 
 DualDLCLiveBridge::TripletConfig DualDLCLiveBridge::readTripletConfig (const var& parsed) const
@@ -975,6 +1213,8 @@ void DualDLCLiveBridge::resetPoseFilters()
     const ScopedLock lock (poseStateLock);
     leftFilterStates.clear();
     rightFilterStates.clear();
+    leftValidity = SideValidityState {};
+    rightValidity = SideValidityState {};
     for (auto& line : lastTriggerTimeMs)
         line.store (0);
 }

@@ -82,6 +82,9 @@ class ParallelRecorder:
         self._csv = None
         self.video_path: Optional[Path] = None
         self.kp_path: Optional[Path] = None
+        self._sink_lock = threading.Lock()  # serializes worker writes vs close() release
+        self._closing = False
+        self._video_failed = False
         self._thread = threading.Thread(target=self._run, name="recorder", daemon=True)
 
     # -- lifecycle -----------------------------------------------------------
@@ -97,14 +100,28 @@ class ParallelRecorder:
 
     def close(self) -> None:
         self._stop.set()
+        # The worker drains the queue (its loop exits only when stop is set AND the
+        # queue is empty), so a generous join lets it flush remaining frames.
+        self._thread.join(timeout=30.0)
         if self._thread.is_alive():
-            self._thread.join(timeout=15.0)
-        if self._writer is not None:
-            self._writer.release()
-        if self._kp is not None:
-            self._kp.close()
-        if self._csv is not None:
-            self._csv.close()
+            residual = self._q.qsize()
+            self._dropped += residual
+            self.log.warning(
+                "Recorder worker still busy after join timeout; ~%d queued frame(s) lost.", residual,
+            )
+        # Take the sink lock so we never release the VideoWriter / close a file while
+        # the worker is mid-write (would be a native cv2/IO data race).
+        with self._sink_lock:
+            self._closing = True
+            if self._writer is not None:
+                self._writer.release()
+                self._writer = None
+            if self._kp is not None:
+                self._kp.close()
+                self._kp = None
+            if self._csv is not None:
+                self._csv.close()
+                self._csv = None
         self.log.info(
             "Recorder closed: wrote=%d dropped=%d video=%s keypoints=%s",
             self._written, self._dropped, self.video_path, self.kp_path,
@@ -119,7 +136,7 @@ class ParallelRecorder:
             frame.copy() if (self.record_video and frame is not None) else None,
             int(frame_index),
             float(capture_ts),
-            np.asarray(pose, dtype=np.float32).copy() if self.record_keypoints else None,
+            np.asarray(pose, dtype=np.float32).copy() if (self.record_keypoints and pose is not None) else None,
             roi,
         )
         try:
@@ -142,17 +159,27 @@ class ParallelRecorder:
                 continue
             frame, fidx, ts, pose, roi = item
             try:
-                if frame is not None:
-                    self._write_video(frame)
-                if pose is not None:
-                    self._write_keypoints(fidx, ts, pose, roi)
-                self._written += 1
+                # Hold the sink lock so close() cannot release/close mid-write.
+                with self._sink_lock:
+                    if not self._closing:
+                        if frame is not None:
+                            self._write_video(frame)
+                        if pose is not None:
+                            self._write_keypoints(fidx, ts, pose, roi)
+                        self._written += 1
+                        if self._written % 100 == 0:  # ~1s @100fps: durable on crash/kill
+                            if self._csv is not None:
+                                self._csv.flush()
+                            if self._kp is not None:
+                                self._kp.flush()
             except Exception as exc:  # never let a write error kill the thread
                 self.log.warning("Recorder write failed at frame %d: %s", fidx, exc)
             finally:
                 self._q.task_done()
 
     def _write_video(self, frame: np.ndarray) -> None:
+        if self._video_failed:
+            return
         if self._writer is None:
             h, w = frame.shape[:2]
             ext = "avi" if self.video_codec.upper() in ("FFV1", "MJPG", "XVID") else "mp4"
@@ -165,6 +192,7 @@ class ParallelRecorder:
                 )
                 self._writer = None
                 self.record_video = False
+                self._video_failed = True  # don't retry the open per in-flight frame
                 return
         bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR) if self.frame_is_rgb else frame
         self._writer.write(bgr)
@@ -187,8 +215,11 @@ class ParallelRecorder:
             self._kp.write(names)
 
     def _write_keypoints(self, fidx: int, ts: float, pose: np.ndarray, roi) -> None:
-        x1 = int(roi[0]) if roi else -1
-        x2 = int(roi[1]) if roi else -1
+        x1 = int(roi[0]) if roi is not None else -1
+        x2 = int(roi[1]) if roi is not None else -1
+        if int(pose.shape[0]) != self.n:  # keep the fixed-size .dlckp stream aligned
+            self.log.warning("Pose has %d rows, expected %d; skipping keypoint record %d", pose.shape[0], self.n, fidx)
+            return
         if self._csv is not None:
             parts = [str(fidx), f"{ts:.6f}", str(x1), str(x2)]
             for i in range(self.n):

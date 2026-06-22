@@ -41,6 +41,8 @@ def convert(src: Path, dst: Path) -> int:
             while True:
                 chunk = f.read(rec_size)
                 if len(chunk) < rec_size:
+                    if len(chunk) != 0:  # truncated trailing record (e.g. crash mid-write)
+                        print(f"warning: ignored a truncated trailing record of {len(chunk)} bytes", file=sys.stderr)
                     break
                 fidx, ts, x1, x2 = _HEAD.unpack_from(chunk, 0)
                 vals = struct.unpack_from(f"<{n * 3}f", chunk, _HEAD.size)

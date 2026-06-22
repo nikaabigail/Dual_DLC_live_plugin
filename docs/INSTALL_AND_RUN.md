@@ -36,7 +36,7 @@ git clone https://github.com/nikaabigail/Dual_DLC_live_plugin.git
 - `python\` — live-рантайм (запускается отсюда);
 - `open_ephys_plugin\DualDLCLiveBridge\` — исходники C++ плагина Open Ephys;
 - `camera_configs\` — `.txt` конфиги камер Daheng (Left/Right);
-- `dist\windows-x64-debug\DualDLCLiveBridge.dll` — собранный плагин (Debug);
+- `dist\windows-x64-release\DualDLCLiveBridge.dll` — собранный плагин (Release, API 10; для боевого OE). Debug-вариант — в `dist\windows-x64-debug\`;
 - `docs\` — документация.
 
 ## 2. Драйвер NVIDIA
@@ -126,6 +126,8 @@ Open Ephys на целевом — **1.0.1 (plugin API 10)**, Release. Гото�
 3. Если не грузится с ошибкой про `vcruntime140.dll` — поставить **VC++ Redistributable x64** (`vc_redist.x64.exe`, это не Visual Studio).
 4. Запустить Open Ephys → в signal chain должен появиться узел `Dual DLCLive Bridge`.
 
+> 💡 Сборку+деплой автоматизирует `scripts\build_plugin.ps1` (см. [`BUILD_PLUGIN.md`](BUILD_PLUGIN.md)): `.\scripts\build_plugin.ps1 -GuiRoot "<путь к plugin-GUI 1.0.1>" -DeployDir "<папка плагинов OE>"`. Портативная сборка OE грузит плагины из `<install>\plugins\`, официальный установщик — из `%LOCALAPPDATA%\Open Ephys\plugins-api10\`.
+
 Параметры узла: `enabled=true`, `udp_port=47000`; для линий 2/3 — `angle_trigger_enabled=true`, `angle_threshold_deg=<порог>`. Детали — `open_ephys_plugin\DualDLCLiveBridge\README.md`.
 
 ## 9. Запуск
@@ -153,6 +155,10 @@ C:\dlc_live_env\Scripts\python.exe dual_rt_dlc_live.py
 ```
 
 В логе ждать: `TORCH_COMPILE applied backend=cudagraphs`, `Opened ... fps=100.0`, `CUDA_CHECK ... cuda=True`, `stage_profile ... result_hz=...`.
+
+Запись видео+keypoints (обе камеры) включена в `config_dual_rt_dlc_live.py` (`DUAL_RECORD_ENABLED`/`SINGLE_RECORD_ENABLED`); видео пишется в lossless `.avi` (FFV1), файлы — в `C:\dlc\DLC_OBS_Spinal_cord_stimulation\recordings`.
+
+> **Полная процедура эксперимента** (запуск OE + плагин, угловой триггер, правила валидности, запись, проверка TTL) — [`RUN_EXPERIMENT.md`](RUN_EXPERIMENT.md).
 
 ## 10. Проверка и диагностика
 

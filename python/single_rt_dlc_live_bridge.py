@@ -122,7 +122,8 @@ class LegRoiTracker:
                 # One window per frame (wrap at the right edge) covers the stripe in
                 # ~fw/width frames. Width stays constant -> cudagraphs stays valid
                 # (never a full-frame scan); misses is NOT reset so it keeps sweeping.
-                self.cx = (self.cx or self.width / 2.0) + self.width
+                base = self.cx if self.cx is not None else self.width / 2.0  # 0.0 is a valid centre
+                self.cx = base + self.width
                 if self.cx > self.fw:
                     self.cx = self.width / 2.0
 
@@ -389,7 +390,7 @@ def main(argv: list[str] | None = None) -> None:
                 frame_w=frame_w,
                 frame_h=frame_h,
                 leg_indices=leg_indices,
-                width=int(getattr(config, "LEG_ROI_WIDTH", 448)),
+                width=int(getattr(config, "LEG_ROI_WIDTH", 256)),
                 detect_thresh=float(getattr(config, "LEG_ROI_DETECT_THRESH", 0.30)),
                 hold_frames=int(getattr(config, "LEG_ROI_HOLD_FRAMES", 100)),
                 center_ema=float(getattr(config, "LEG_ROI_CENTER_EMA", 0.35)),
@@ -431,7 +432,8 @@ def main(argv: list[str] | None = None) -> None:
             infer_start = time.perf_counter()
             initialized, pose, preprocess_ms, model_infer_ms = dual.run_raw_inference(dlc_live, initialized, packet)
             infer_ms = (time.perf_counter() - infer_start) * 1000.0
-            stats["infer_ms_ema"] = _ema(stats.get("infer_ms_ema"), infer_ms)
+            if frame_index > 1:  # skip the one-time init/compile spike in the overlay EMA
+                stats["infer_ms_ema"] = _ema(stats.get("infer_ms_ema"), infer_ms)
             if roi_tracker is not None:
                 roi_tracker.update(pose)
             infer_end = time.perf_counter()

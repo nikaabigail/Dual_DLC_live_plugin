@@ -927,6 +927,7 @@ def raw_pose_result(
         "preprocess_ms": preprocess_ms,
         "model_infer_ms": infer_ms if model_infer_ms is None else model_infer_ms,
         "raw_pose_array": raw_pose_array,
+        "full_pose": np.asarray(pose),  # all model bodyparts, full-frame coords (for recording)
         "raw_visible": raw_visible,
         "filtered_visible": raw_visible,
         "has_triplet": False,
@@ -1058,6 +1059,86 @@ def postprocess_pose_without_processor(dlc_live, pose: np.ndarray) -> np.ndarray
     return pose_arr
 
 
+class LegRoiTracker:
+    """Fixed-width sliding ROI that follows the hind legs of ONE camera stream.
+
+    Same logic as the single-camera bridge: the window centre is the mean X of
+    whatever hind-leg points are visible (>= ``detect_thresh``), EMA-smoothed; on
+    loss it HOLDS at the last position for ``hold_frames`` frames (rides out
+    turns/occlusions) then SWEEPS to re-acquire. The width is always constant so
+    the input shape never changes (cudagraphs/torch.compile stay valid, and in
+    dual the two cameras' crops stay the same shape for batch inference).
+
+    Works on any (N,3) pose array: pass ``leg_indices`` into whatever you feed
+    update() -- e.g. the 6-point raw_pose_array with leg_indices=range(6).
+    """
+
+    def __init__(
+        self,
+        frame_w: int,
+        frame_h: int,
+        leg_indices: list,
+        width: int,
+        detect_thresh: float,
+        hold_frames: int,
+        center_ema: float,
+    ) -> None:
+        self.fw = int(frame_w)
+        self.fh = int(frame_h)
+        self.leg_idx = list(leg_indices)
+        self.width = max(16, min(int(width), self.fw))
+        self.thresh = float(detect_thresh)
+        self.hold_frames = int(hold_frames)
+        self.ema = float(center_ema)
+        self.cx: Optional[float] = self.fw / 2.0  # start centred, never full-frame
+        self.misses = 0
+
+    def window(self) -> Optional[list]:
+        if self.cx is None:
+            return None
+        half = self.width // 2
+        x1 = int(round(self.cx)) - half
+        x1 = max(0, min(x1, self.fw - self.width))
+        return [x1, x1 + self.width, 0, self.fh]
+
+    def update(self, pose: np.ndarray) -> None:
+        if not self.leg_idx:
+            return
+        pts = np.asarray(pose)[self.leg_idx]
+        visible = pts[pts[:, 2] >= self.thresh]
+        if len(visible) >= 1:
+            cx_new = float(np.mean(visible[:, 0]))
+            if self.cx is None or self.misses > 0:
+                self.cx = cx_new  # snap onto legs when (re)acquiring
+            else:
+                self.cx = self.ema * cx_new + (1.0 - self.ema) * self.cx
+            self.misses = 0
+        else:
+            self.misses += 1
+            if self.misses > self.hold_frames:  # hold ~1s, then sweep
+                base = self.cx if self.cx is not None else self.width / 2.0  # 0.0 is a valid centre
+                self.cx = base + self.width
+                if self.cx > self.fw:
+                    self.cx = self.width / 2.0
+
+
+def restore_pose_with_window(dlc_live, pose: np.ndarray, window) -> np.ndarray:
+    """Restore a pose to full-frame coords using an EXPLICIT crop window.
+
+    Needed in the batch path where the two cameras have DIFFERENT ROI windows, so
+    a single dlc_live.cropping cannot restore both (unlike the sequential path,
+    which uses postprocess_pose_without_processor with dlc_live.cropping).
+    """
+    pose_arr = np.array(pose, copy=True)
+    resize = getattr(dlc_live, "resize", None)
+    if resize is not None:
+        pose_arr[..., :2] *= 1.0 / float(resize)
+    if window is not None:
+        pose_arr[..., 0] += window[0]
+        pose_arr[..., 1] += window[2]
+    return pose_arr
+
+
 def run_batch_inference(
     dlc_live,
     left: CameraRuntime,
@@ -1065,6 +1146,8 @@ def run_batch_inference(
     left_packet: live.FramePacket,
     right_packet: live.FramePacket,
     bodypart_to_idx: dict[str, int],
+    left_window=None,
+    right_window=None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     if not batch_inference_supported(dlc_live):
         raise RuntimeError("DLCLive runner does not support the fast dual-frame batch path.")
@@ -1077,7 +1160,14 @@ def run_batch_inference(
 
     start = time.perf_counter()
     preprocess_start = start
-    processed_frames = [dlc_live.process_frame(left_packet.frame), dlc_live.process_frame(right_packet.frame)]
+    # Crop each camera to ITS OWN leg ROI (None = full frame). Both windows are a
+    # fixed width, so the two processed frames keep an identical shape -> the batch
+    # stacks and (if compiled) cudagraphs stays valid.
+    dlc_live.cropping = left_window
+    pf_left = dlc_live.process_frame(left_packet.frame)
+    dlc_live.cropping = right_window
+    pf_right = dlc_live.process_frame(right_packet.frame)
+    processed_frames = [pf_left, pf_right]
     preprocess_end = time.perf_counter()
     if processed_frames[0].shape != processed_frames[1].shape:
         raise RuntimeError(f"Batch frames must have identical shapes, got {processed_frames[0].shape} and {processed_frames[1].shape}.")
@@ -1106,7 +1196,7 @@ def run_batch_inference(
             pose = torch.zeros((bodyparts, coords), dtype=pose.dtype, device=pose.device)
         else:
             pose = pose[0]
-        poses.append(postprocess_pose_without_processor(dlc_live, pose.detach().cpu().numpy()))
+        poses.append(restore_pose_with_window(dlc_live, pose.detach().cpu().numpy(), (left_window, right_window)[index]))
 
     if poses:
         dlc_live.pose = poses[-1]
@@ -1152,6 +1242,14 @@ def inference_loop(
     pair_index = 0
     process_every = max(1, int(getattr(config, "DUAL_PROCESS_EVERY_N_PAIRS", 1)))
     batch_disabled = False
+    roi_enabled = bool(getattr(config, "LEG_ROI_ENABLED", False))
+    roi_leg_idx = list(range(len(config.DUAL_USE_POINTS)))  # all hindleg points in raw_pose_array
+    left_roi = None
+    right_roi = None
+    rec_enabled = bool(getattr(config, "DUAL_RECORD_ENABLED", False))
+    rec_bodyparts = [name for name, _ in sorted(bodypart_to_idx.items(), key=lambda kv: kv[1])]
+    left_rec = None
+    right_rec = None
 
     try:
         while not stop_event.is_set():
@@ -1182,6 +1280,46 @@ def inference_loop(
                 else camera_dt_raw_ms - sdk_baseline_ms
             )
 
+            if roi_enabled and left_roi is None:
+                _mk = lambda _fr: LegRoiTracker(
+                    int(_fr.shape[1]), int(_fr.shape[0]), roi_leg_idx,
+                    int(getattr(config, "LEG_ROI_WIDTH", 256)),
+                    float(getattr(config, "LEG_ROI_DETECT_THRESH", 0.30)),
+                    int(getattr(config, "LEG_ROI_HOLD_FRAMES", 100)),
+                    float(getattr(config, "LEG_ROI_CENTER_EMA", 0.35)),
+                )
+                left_roi = _mk(left_packet.frame)   # each tracker uses its own camera's geometry
+                right_roi = _mk(right_packet.frame)
+                if logger is not None:
+                    logger.info("Dual leg ROI enabled: width=%d hold=%d ema=%.2f (per camera)",
+                                left_roi.width, left_roi.hold_frames, left_roi.ema)
+            lw = left_roi.window() if left_roi is not None else None
+            rw = right_roi.window() if right_roi is not None else None
+
+            if rec_enabled and left_rec is None:
+                import live_recorder
+                from datetime import datetime
+                _stem = "dual_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                def _mk_rec(side, runtime):
+                    return live_recorder.ParallelRecorder(
+                        out_dir=getattr(config, "SINGLE_RECORD_DIR", "recordings"),
+                        stem=f"{_stem}_{side}", bodyparts=rec_bodyparts,
+                        fps=runtime.source.nominal_fps(),
+                        frame_is_rgb=str(getattr(config, "GALAXY_OUTPUT_COLOR", "bgr")).strip().lower() == "rgb",
+                        record_video=bool(getattr(config, "SINGLE_RECORD_VIDEO", True)),
+                        video_codec=str(getattr(config, "SINGLE_RECORD_VIDEO_CODEC", "mp4v")),
+                        record_keypoints=bool(getattr(config, "SINGLE_RECORD_KEYPOINTS", True)),
+                        kp_format=str(getattr(config, "SINGLE_KP_FORMAT", "binary")),
+                        queue_size=int(getattr(config, "SINGLE_RECORD_QUEUE", 128)),
+                        logger=logger,
+                    )
+
+                left_rec = _mk_rec("left", left)
+                left_rec.start()
+                right_rec = _mk_rec("right", right)
+                right_rec.start()
+
             use_batch = (
                 initialized
                 and not batch_disabled
@@ -1197,6 +1335,8 @@ def inference_loop(
                         left_packet,
                         right_packet,
                         bodypart_to_idx,
+                        left_window=lw,
+                        right_window=rw,
                     )
                 except Exception as exc:
                     if not bool(getattr(config, "DUAL_BATCH_FALLBACK_TO_SEQUENTIAL", True)):
@@ -1204,6 +1344,7 @@ def inference_loop(
                     batch_disabled = True
                     if logger is not None:
                         logger.warning("Batch inference disabled; falling back to sequential DLCLive calls: %s", exc)
+                    dlc_live.cropping = lw
                     initialized, left_result = run_inference(
                         dlc_live,
                         initialized,
@@ -1211,6 +1352,7 @@ def inference_loop(
                         left_packet,
                         bodypart_to_idx,
                     )
+                    dlc_live.cropping = rw
                     initialized, right_result = run_inference(
                         dlc_live,
                         initialized,
@@ -1219,6 +1361,7 @@ def inference_loop(
                         bodypart_to_idx,
                     )
             else:
+                dlc_live.cropping = lw
                 initialized, left_result = run_inference(
                     dlc_live,
                     initialized,
@@ -1226,6 +1369,7 @@ def inference_loop(
                     left_packet,
                     bodypart_to_idx,
                 )
+                dlc_live.cropping = rw
                 initialized, right_result = run_inference(
                     dlc_live,
                     initialized,
@@ -1233,6 +1377,23 @@ def inference_loop(
                     right_packet,
                     bodypart_to_idx,
                 )
+
+            # ROI: stash the window each camera used (for the display box) and
+            # advance each tracker from its own 6-point hindleg array.
+            if left_roi is not None:
+                left_result["roi_window"] = lw
+                right_result["roi_window"] = rw
+                _la = left_result.get("raw_pose_array")
+                _ra = right_result.get("raw_pose_array")
+                if isinstance(_la, np.ndarray):
+                    left_roi.update(_la)
+                if isinstance(_ra, np.ndarray):
+                    right_roi.update(_ra)
+
+            if left_rec is not None:
+                # raw frame + full-frame pose (+ ROI window) per camera -> background threads.
+                left_rec.submit(left_packet.frame, pair_index, float(left_packet.capture_ts), left_result.get("full_pose"), lw)
+                right_rec.submit(right_packet.frame, pair_index, float(right_packet.capture_ts), right_result.get("full_pose"), rw)
 
             if profiler is not None:
                 profiler.observe(
@@ -1267,6 +1428,11 @@ def inference_loop(
     except BaseException as exc:
         state.last_error = exc
         stop_event.set()
+    finally:
+        if left_rec is not None:
+            left_rec.close()  # drain + flush both recorders on exit
+        if right_rec is not None:
+            right_rec.close()
 
 
 def get_latest_inference(state: InferenceState) -> tuple[int, Optional[PairInferenceResult]]:
@@ -1315,6 +1481,18 @@ def frame_for_opencv_display(frame: np.ndarray) -> np.ndarray:
     if str(getattr(config, "GALAXY_OUTPUT_COLOR", "bgr")).strip().lower() == "rgb":
         return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
     return frame.copy()
+
+
+def draw_roi_box(display: np.ndarray, window) -> None:
+    """Draw the yellow leg-ROI rectangle (full-frame coords) on a display frame."""
+    if window is None:
+        return
+    x1, x2, y1, y2 = int(window[0]), int(window[1]), int(window[2]), int(window[3])
+    cv2.rectangle(display, (x1, y1), (max(x1, x2 - 1), max(y1, y2 - 1)), (0, 255, 255), 2)
+    cv2.putText(
+        display, f"ROI {x2 - x1}px", (min(x1 + 5, max(0, display.shape[1] - 95)), y1 + 18),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1, cv2.LINE_AA,
+    )
 
 
 def write_csv_row(csv_path: Path, header_written: bool, row: list[object]) -> bool:
@@ -1514,6 +1692,8 @@ def main() -> None:
 
                 left_display = live.draw_overlay(frame_for_opencv_display(left_packet.frame), draw_points_for_result(left_result), left_metrics)
                 right_display = live.draw_overlay(frame_for_opencv_display(right_packet.frame), draw_points_for_result(right_result), right_metrics)
+                draw_roi_box(left_display, left_result.get("roi_window"))
+                draw_roi_box(right_display, right_result.get("roi_window"))
                 add_dual_text(
                     left_display,
                     left,

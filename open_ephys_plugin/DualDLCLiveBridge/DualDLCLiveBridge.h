@@ -78,6 +78,26 @@ private:
         String pickedSide;
     };
 
+    // Per-camera state for the physiological validity gates (angle band, angle
+    // rate-of-change, segment-relative displacement). Kept separate from the
+    // per-point PointFilterState because these rules are triplet-level and need a
+    // previous ANGLE and a previous hip-ankle SEGMENT, neither of which the
+    // per-point filter stores. lastSide guards against the picked leg flipping
+    // L<->R within one camera (deltas must only compare the same leg).
+    struct SideValidityState
+    {
+        bool hasLast = false;
+        int64 lastFrameId = -1;
+        String lastSide;
+        double lastHipX = 0.0, lastHipY = 0.0;
+        double lastAnkleX = 0.0, lastAnkleY = 0.0;
+        double lastToesX = 0.0, lastToesY = 0.0;
+        double lastSegLen = 0.0;
+        bool hasLastAngle = false;
+        double lastAngleDeg = 0.0;
+        int64 lastAngleFrameId = -1;
+    };
+
     using PosePointMap = std::unordered_map<std::string, PosePoint>;
     using FilterStateMap = std::unordered_map<std::string, PointFilterState>;
 
@@ -98,6 +118,12 @@ private:
                                            const String& cameraName,
                                            const TripletConfig& triplets,
                                            FilterStateMap& filterStates);
+    void applyValidityGates (SidePoseResult& result,
+                             SideValidityState& validity,
+                             const PosePoint& hip,
+                             const PosePoint& ankle,
+                             const PosePoint& toes,
+                             int64 frameId);
     TripletConfig readTripletConfig (const var& parsed) const;
     PosePoint readPosePoint (const var& rawPoints, const String& name) const;
     PosePoint filterPoint (const String& name,
@@ -132,6 +158,8 @@ private:
     CriticalSection poseStateLock;
     FilterStateMap leftFilterStates;
     FilterStateMap rightFilterStates;
+    SideValidityState leftValidity;
+    SideValidityState rightValidity;
     std::atomic<int64> packetsReceived { 0 };
     std::atomic<int64> lastPairIndex { -1 };
     std::atomic<int64> lastPacketTimeMs { 0 };
