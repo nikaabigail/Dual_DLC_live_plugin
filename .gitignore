@@ -28,3 +28,9 @@ cmake_install.cmake
 !dist/windows-x64-debug/DualDLCLiveBridge.dll
 !dist/windows-x64-release/DualDLCLiveBridge.dll
 
+
+# Gait-phase artifacts (data/logs, not source)
+phases/
+_rt_*.txt
+stim_overlay*.mp4
+rt_stim_*.mp4
