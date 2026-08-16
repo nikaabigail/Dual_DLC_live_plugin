@@ -13,8 +13,10 @@
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -438,3 +440,137 @@ def test_roi_tracker_defaults_match_config():
     assert float(got["detect_thresh"]) == want["LEG_ROI_DETECT_THRESH"]
     assert float(got["hold_frames"]) == want["LEG_ROI_HOLD_FRAMES"]
     assert float(got["center_ema"]) == want["LEG_ROI_CENTER_EMA"]
+
+
+# --------------------------------------------------------------------------- #
+# интеграция в боевой мост
+# --------------------------------------------------------------------------- #
+
+BODYPARTS_MIN = ["hl_toes_r", "hl_iliac_r", "hl_toes_l", "hl_iliac_l"]
+IDX_MIN = {n: i for i, n in enumerate(BODYPARTS_MIN)}
+
+
+def _pose_stream(toe, body):
+    """Синтетика -> массивы поз (K, 3), как их отдаёт DLCLive."""
+    out = np.zeros((len(toe), len(BODYPARTS_MIN), 3), dtype=float)
+    out[:, IDX_MIN["hl_toes_r"]] = toe
+    out[:, IDX_MIN["hl_iliac_r"]] = body
+    out[:, IDX_MIN["hl_toes_l"]] = toe
+    out[:, IDX_MIN["hl_iliac_l"]] = body
+    return out
+
+
+def _make_trigger(monkeypatch, **over):
+    import config_dual_rt_dlc_live as cfg
+    from gait_phase_trigger import PhaseTrigger
+
+    defaults = dict(PHASE_TRIGGER_ENABLED=True, PHASE_TRIGGER_LEG="r",
+                    PHASE_TRIGGER_TTL_LINE=4, PHASE_TRIGGER_TARGET_PCT=145.0,
+                    PHASE_TRIGGER_HOLD_FRAMES=2, PHASE_TRIGGER_FPS=FPS)
+    defaults.update(over)
+    for k, v in defaults.items():
+        monkeypatch.setattr(cfg, k, v, raising=False)
+    return PhaseTrigger(logging.getLogger("test"), FPS, IDX_MIN)
+
+
+def test_phase_trigger_disabled_by_default():
+    """В конфиге по умолчанию выключен: боевой контур не меняет поведения."""
+    import config_dual_rt_dlc_live as cfg
+    from gait_phase_trigger import PhaseTrigger
+
+    assert cfg.PHASE_TRIGGER_ENABLED is False
+    tr = PhaseTrigger(logging.getLogger("test"), FPS, IDX_MIN)
+    toe, body = synth_gait(n_cycles=20)
+    poses = _pose_stream(toe, body)
+    assert not any(tr.update(poses[i]) for i in range(len(poses)))
+    assert tr.fired_total == 0
+
+
+def test_phase_trigger_fires_once_per_cycle(monkeypatch):
+    tr = _make_trigger(monkeypatch, PHASE_TRIGGER_HOLD_FRAMES=1)
+    toe, body = synth_gait(n_cycles=40)
+    poses = _pose_stream(toe, body)
+    high = sum(int(tr.update(poses[i])) for i in range(len(poses)))
+    n_cyc = len(poses) / CYCLE_N
+    assert 0.7 * n_cyc < tr.fired_total <= n_cyc + 1
+    assert high == tr.fired_total          # hold=1 кадр -> один кадр на импульс
+
+
+def test_phase_trigger_holds_line_for_configured_frames(monkeypatch):
+    """Линия должна стоять поднятой ровно hold_frames кадров на импульс."""
+    hold = 4
+    tr = _make_trigger(monkeypatch, PHASE_TRIGGER_HOLD_FRAMES=hold)
+    toe, body = synth_gait(n_cycles=40)
+    poses = _pose_stream(toe, body)
+    high = sum(int(tr.update(poses[i])) for i in range(len(poses)))
+    assert tr.fired_total > 20
+    assert high == pytest.approx(hold * tr.fired_total, rel=0.05)
+
+
+@pytest.mark.parametrize("bad,exc", [
+    ({"PHASE_TRIGGER_TTL_LINE": 9}, ValueError),
+    ({"PHASE_TRIGGER_LEG": "auto"}, ValueError),
+])
+def test_phase_trigger_rejects_bad_config(monkeypatch, bad, exc):
+    """
+    Плохой конфиг должен падать на старте, а не тихо не стрелять посреди
+    эксперимента. Автовыбор ноги отвергается сознательно: эталон строится для
+    конкретной ноги, и переключение обнулило бы петлю.
+    """
+    with pytest.raises(exc):
+        _make_trigger(monkeypatch, **bad)
+
+
+def test_phase_trigger_requires_points_in_model(monkeypatch):
+    import config_dual_rt_dlc_live as cfg
+    from gait_phase_trigger import PhaseTrigger
+
+    monkeypatch.setattr(cfg, "PHASE_TRIGGER_ENABLED", True, raising=False)
+    monkeypatch.setattr(cfg, "PHASE_TRIGGER_LEG", "r", raising=False)
+    with pytest.raises(KeyError):
+        PhaseTrigger(logging.getLogger("test"), FPS, {"nose": 0})
+
+
+def test_bridge_payload_carries_phase_line():
+    """
+    Бит фазового триггера обязан доезжать до пакета и не задевать линии 0..3,
+    занятые has_triplet и angle-триггером.
+    """
+    import dual_rt_dlc_live as dual
+
+    br = dual.OpenEphysBridge.__new__(dual.OpenEphysBridge)
+    br.angle_threshold_deg = None
+    br.request_ack = False
+    br._phase_trigger_line = None
+    br._phase_trigger_state = False
+
+    side = {"has_triplet": True, "hind_angle": None}
+    res = SimpleNamespace(pair_index=7, host_dt_ms=10.0, camera_dt_ms=10.0,
+                          left_result=side, right_result=side)
+
+    base = br._build_ttl_payload(res, {}, {})["ttl_lines"]
+    assert base[:4] == [True, True, False, False]
+    assert base[4] is False
+
+    br.set_phase_trigger(4, True)
+    hot = br._build_ttl_payload(res, {}, {})["ttl_lines"]
+    assert hot[4] is True
+    assert hot[:4] == base[:4], "фазовый бит задел чужие линии"
+
+    br.set_phase_trigger(4, False)
+    assert br._build_ttl_payload(res, {}, {})["ttl_lines"][4] is False
+
+
+def test_bridge_untouched_when_trigger_disabled():
+    """Пока линия не назначена, пакет обязан быть в точности прежним."""
+    import dual_rt_dlc_live as dual
+
+    br = dual.OpenEphysBridge.__new__(dual.OpenEphysBridge)
+    br.angle_threshold_deg = None
+    br.request_ack = False
+    br._phase_trigger_line = None
+    br._phase_trigger_state = True          # состояние есть, линии нет
+    side = {"has_triplet": False, "hind_angle": None}
+    res = SimpleNamespace(pair_index=1, host_dt_ms=10.0, camera_dt_ms=None,
+                          left_result=side, right_result=side)
+    assert br._build_ttl_payload(res, {}, {})["ttl_lines"] == [False] * 8

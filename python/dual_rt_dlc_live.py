@@ -94,7 +94,7 @@ class StageProfiler:
     avg_ms: dict[str, float] = field(default_factory=dict)
     samples: dict[str, int] = field(default_factory=dict)
 
-    ORDER = ("camera/read", "preprocess", "inference", "pack/send", "display")
+    ORDER = ("camera/read", "preprocess", "inference", "phase", "pack/send", "display")
 
     def observe(self, stage: str, elapsed_ms: float) -> None:
         if not self.enabled:
@@ -135,6 +135,11 @@ class OpenEphysBridge:
         threshold = getattr(config, "DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG", None)
         self.angle_threshold_deg = None if threshold is None else float(threshold)
         self.sock: Optional[socket.socket] = None
+        # Фазовый триггер выставляется снаружи (мостом) перед каждым send.
+        # Держать его здесь, а не считать внутри, потому что состояние фазы
+        # живёт в PhaseTrigger и нужно ещё и оверлею.
+        self._phase_trigger_line: Optional[int] = None
+        self._phase_trigger_state: bool = False
 
     def open(self) -> None:
         if not self.enabled:
@@ -167,6 +172,18 @@ class OpenEphysBridge:
             self.sock.sendto(data, (self.host, self.port))
         except Exception as exc:
             self.logger.warning("Open Ephys bridge send failed: %s", exc)
+
+    def set_phase_trigger(self, line: Optional[int], state: bool) -> None:
+        """
+        Состояние фазовой TTL-линии на СЛЕДУЮЩИЙ отправленный пакет.
+
+        Работает только в режиме packet_mode="ttl": там слово формирует Python.
+        В бинарном pose-режиме плагин пересобирает слово сам из позы и этот бит
+        погасит, поэтому вызов молча ничего не даст - предупреждение об этом
+        выдаёт PhaseTrigger при старте.
+        """
+        self._phase_trigger_line = line
+        self._phase_trigger_state = bool(state)
 
     def _raw_points_for_payload(self, result: dict[str, object]) -> dict[str, dict[str, float | None]]:
         raw_points = result.get("raw_points")
@@ -324,6 +341,8 @@ class OpenEphysBridge:
         ttl_lines[1] = bool(result.right_result["has_triplet"])
         ttl_lines[2] = self._angle_trigger(result.left_result)
         ttl_lines[3] = self._angle_trigger(result.right_result)
+        if self._phase_trigger_line is not None:
+            ttl_lines[self._phase_trigger_line] = self._phase_trigger_state
 
         payload: dict[str, object] = {
             "schema": "dual_dlc_live.v1",
