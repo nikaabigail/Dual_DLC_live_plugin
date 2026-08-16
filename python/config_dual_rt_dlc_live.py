@@ -92,7 +92,15 @@ SINGLE_EMIT_BOTH_LEGS = False
 #     would flip the shape (256<->1920) and force a revert to ~2x slower eager.
 # Assumes base CROPPING is None (the camera already hardware-crops to the stripe).
 LEG_ROI_ENABLED = True
-LEG_ROI_WIDTH = 256            # px, fixed window width
+LEG_ROI_WIDTH = 448            # px, fixed window width. 448 = размер кропа,
+                               # на котором модель обучалась (crop_sampling
+                               # 448x448). Замер на 68 отложенных кадрах против
+                               # ручной разметки: ошибка 1.00 -> 0.87 px
+                               # (Wilcoxon p=5e-11), likelihood 0.840 -> 0.891
+                               # (p=4e-39), точек ниже порога доверия 5.6% ->
+                               # 3.0%. Сквозной эффект: разброс попадания в цель
+                               # 15.0% -> 11.9%. Цена 0.3 мс: инференс упирается
+                               # в накладные расходы, а не в пиксели.
 LEG_ROI_DETECT_THRESH = 0.30   # min likelihood for a hind-leg point to anchor the centre
 LEG_ROI_HOLD_FRAMES = 100      # ~1 s @100fps: HOLD at the last leg position this long (rides out turns/
                                # occlusions where legs vanish then reappear near the same X) before sweeping

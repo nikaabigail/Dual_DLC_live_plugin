@@ -197,7 +197,7 @@ class LegRoiTracker:
     пропадают и появляются там же), и только потом SWEEP-ит по кадру.
     """
 
-    def __init__(self, frame_w, frame_h, leg_indices, width=256,
+    def __init__(self, frame_w, frame_h, leg_indices, width=448,
                  detect_thresh=0.30, hold_frames=100, center_ema=0.35):
         self.fw, self.fh = int(frame_w), int(frame_h)
         self.leg_idx = list(leg_indices)

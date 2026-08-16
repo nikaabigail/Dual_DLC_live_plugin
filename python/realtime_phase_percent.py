@@ -390,7 +390,7 @@ def main(argv=None):
     ap.add_argument("--latency-ms", type=float, default=28.0)
     ap.add_argument("--start-frame", type=int, default=0)
     ap.add_argument("--max-frames", type=int, default=15687)
-    ap.add_argument("--roi-width", type=int, default=256)
+    ap.add_argument("--roi-width", type=int, default=448)
     ap.add_argument("--event-lag", type=int, default=1)
     ap.add_argument("--pct-med-win", type=int, default=1)
     ap.add_argument("--min-gap", type=float, default=100.0,
@@ -446,9 +446,13 @@ def main(argv=None):
         pose = np.asarray(live.get_pose(frame), dtype=np.float32)
         tracker.update(pose)
         w = tracker.window()
-        if w:
-            pose = pose.copy()
-            pose[:, 0] += w[0]
+        # Смещение кропа добавлять НЕ НАДО: DLCLive возвращает координаты уже
+        # восстановленными в полный кадр. Проверено прямо: при кропах [40..296],
+        # [80..336], [120..376] один и тот же сустав даёт x = 161.8 при истине
+        # 161. Боевой мост это учитывает, а здесь стояло ручное += w[0], то есть
+        # двойное смещение. По фазе оно почти не било (relx = toe - iliac его
+        # сокращает), но портило скорость в событийном детекторе: окно ROI ездит
+        # на 2 px за кадр (p95 8 px), это 200 px/с при скорости ленты 450 px/с.
         t2 = time.perf_counter()
         _, ev = det.update(pose[i_toe, 0], pose[i_toe, 2], pose[i_body, 0], pose[i_body, 2])
         t3 = time.perf_counter()
