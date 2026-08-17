@@ -73,6 +73,16 @@ void DualDLCLiveBridge::registerParameters()
                      65535,
                      true);
 
+    addIntParameter (Parameter::PROCESSOR_SCOPE,
+                     "watchdog_timeout_ms",
+                     "Watchdog ms",
+                     "Force every TTL line low if no packet arrived for this long "
+                     "(0 disables the watchdog)",
+                     100,
+                     0,
+                     2000,
+                     true);
+
     addBooleanParameter (Parameter::PROCESSOR_SCOPE,
                          "angle_trigger_enabled",
                          "Angle trigger",
@@ -325,6 +335,11 @@ void DualDLCLiveBridge::parameterValueChanged (Parameter* param)
         ensureSocket();
     }
 
+    if (name.equalsIgnoreCase ("watchdog_timeout_ms"))
+    {
+        watchdogTimeoutMs.store ((int) param->getValue());
+    }
+
     if (name.equalsIgnoreCase ("use_filter")
         || name.equalsIgnoreCase ("enable_pcutoff")
         || name.equalsIgnoreCase ("enable_despike")
@@ -356,6 +371,7 @@ void DualDLCLiveBridge::process (AudioBuffer<float>& buffer)
     if (! ttlChannelReady)
         return;
 
+    applyPacketWatchdog();
     emitPendingTtlState (buffer.getNumSamples());
 }
 
@@ -472,6 +488,7 @@ void DualDLCLiveBridge::closeSocket()
     queueTtlWord (0);
     for (auto& line : desiredLineStates)
         line.store (false);
+    watchdogTripped.store (false);
     resetPoseFilters();
     lastPacketMode.store (packetModeNone);
     lastLeftAngleDeg.store (-1.0);
@@ -1306,6 +1323,57 @@ void DualDLCLiveBridge::queueTtlWord (uint8 ttlWord)
         while (pendingTtlWords.size() > maxPendingTtlWords)
             pendingTtlWords.pop_front();
     }
+}
+
+bool DualDLCLiveBridge::isWatchdogTripped() const
+{
+    return watchdogTripped.load();
+}
+
+int64 DualDLCLiveBridge::getWatchdogTrips() const
+{
+    return watchdogTrips.load();
+}
+
+void DualDLCLiveBridge::applyPacketWatchdog()
+{
+    /*  Гасит все TTL-линии, если пакеты перестали приходить.
+
+        Зачем. queueTtlWord эмитит только при ИЗМЕНЕНИИ слова. Если источник
+        (Python) упал, завис или потерял камеру в момент, когда линия поднята,
+        слово менять больше некому - и линия останется HIGH бесконечно. Для
+        замкнутого контура стимуляции это залипший гейт на живом животном,
+        причём внешне всё выглядит штатно. Возраст последнего пакета плагин уже
+        считает и показывает в UI, оставалось им воспользоваться.
+
+        Семантика: сработал один раз - погасили и держим, пока не придёт новый
+        пакет. Приход пакета снимает взвод, чтобы сторож мог сработать снова.
+        Таймаут 0 выключает сторожа целиком.
+    */
+    const int timeoutMs = watchdogTimeoutMs.load();
+    if (timeoutMs <= 0)
+        return;
+
+    const int64 age = getLastPacketAgeMs();
+    if (age < 0)
+        return;                       // пакетов ещё не было, линии и так внизу
+
+    if (age <= (int64) timeoutMs)
+    {
+        watchdogTripped.store (false);
+        return;
+    }
+
+    if (watchdogTripped.exchange (true))
+        return;                       // уже погасили в этом эпизоде
+
+    for (auto& line : desiredLineStates)
+        line.store (false);
+    queueTtlWord (0);
+    watchdogTrips.fetch_add (1);
+
+    LOGD ("DualDLCLiveBridge watchdog: no packet for ", age,
+          " ms (limit ", timeoutMs, "), all TTL lines forced low");
 }
 
 void DualDLCLiveBridge::emitPendingTtlState (int numSamples)

@@ -66,3 +66,43 @@ cd C:\dlc\Dual_DLC_live_plugin
    - собрать против **официального** `open-ephys/plugin-GUI` на теге **v1.0.1** (а не локального main-дерева), Release;
    - либо перенести на целевой твою **from-source Release-сборку всего GUI** (тогда плагин и хост — из одного дерева, совместимость гарантирована), запускать её `open-ephys.exe` вместо официального;
    - крайний вариант — поставить VS на целевой и собрать там против его GUI.
+
+---
+
+## Тесты плагина
+
+Юнит-тесты живут в `open_ephys_plugin/DualDLCLiveBridge/Tests/` и собираются
+целью `DualDLCLiveBridge_tests` внутри дерева plugin-GUI:
+
+```powershell
+$G = "C:\path	o\plugin-GUI"
+$vc = "C:\Program Files\Microsoft Visual Studio8\Insiders\VC\Auxiliary\Buildcvars64.bat"
+
+# исходники плагина + тесты кладём в дерево GUI
+Copy-Item open_ephys_plugin\DualDLCLiveBridge\* "$G\Plugins\DualDLCLiveBridge\" -Recurse -Force
+
+cmd /c "call `"$vc`" && cmake -S `"$G`" -B `"$G\Build-tests`" -G Ninja ^
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DOE_DONT_CHECK_BUILD_PATH=TRUE"
+cmd /c "call `"$vc`" && cmake --build `"$G\Build-tests`" --target DualDLCLiveBridge_tests"
+
+# ОБЯЗАТЕЛЬНО: обновить копию DLL, иначе тест гоняет старую
+Copy-Item "$G\Build-tests\Plugins\DualDLCLiveBridge.dll" `
+          "$G\Build-tests\TestBin\DualDLCLiveBridge\" -Force
+
+& "$G\Build-tests\TestBin\DualDLCLiveBridge\DualDLCLiveBridge_tests.exe"
+```
+
+Три вещи, на которых легко споткнуться:
+
+- **Ninja лежит в сборке Visual Studio Insiders**, а не Community. Если брать
+  vcvars из Community, CMake не найдёт генератор.
+- **`-DOE_DONT_CHECK_BUILD_PATH=TRUE`** обязателен, иначе CMake требует
+  конфигурировать строго в папке `Build`.
+- **Копировать DLL в `TestBin` руками.** Она попадает туда только при линковке
+  exe; если менялся лишь `.cpp` плагина, exe не перелинковывается и тест молча
+  проверяет старый бинарь. Проверено мутацией: без копирования убранное гашение
+  TTL-линий не ловится вовсе.
+
+Класс помечен макросом `TESTABLE` (как штатные плагины GUI): при `BUILD_TESTS`
+он экспортирует символы, иначе разворачивается в пустоту и на боевую сборку не
+влияет.
