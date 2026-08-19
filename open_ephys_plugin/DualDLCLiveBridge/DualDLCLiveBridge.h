@@ -22,8 +22,12 @@
 #include <utility>
 #include <vector>
 
-class DualDLCLiveBridge : public GenericProcessor,
-                          private Thread
+/*  TESTABLE экспортирует символы класса при сборке с BUILD_TESTS, иначе
+    разворачивается в ничто. Без него юнит-тест не слинкуется с плагином:
+    из DLL наружу видны только точки входа плагина. Так же сделано у штатных
+    плагинов GUI, см. CommonAvgRef.h. */
+class TESTABLE DualDLCLiveBridge : public GenericProcessor,
+                                   private Thread
 {
 public:
     DualDLCLiveBridge();
@@ -44,6 +48,14 @@ public:
     double getLastLeftAngleDeg() const;
     double getLastRightAngleDeg() const;
     int getLastPacketMode() const;
+    bool isWatchdogTripped() const;
+    int64 getWatchdogTrips() const;
+
+    /*  Публичный только ради теста. Штатно зовётся из process(), но в тестовом
+        харнесе GUI выдача TTL-события падает (setTTLState разыменовывает
+        ttlEventChannel, который в харнесе не проставляется), поэтому тест
+        проверяет решение сторожа, не доходя до эмиссии. */
+    void applyPacketWatchdog();
 
 private:
     struct PosePoint
@@ -168,6 +180,12 @@ private:
     std::atomic<double> lastRightAngleDeg { -1.0 };
     std::atomic<int> lastPacketMode { 0 };
     std::array<std::atomic<int64>, 8> lastTriggerTimeMs {};
+    // Сторож по возрасту пакета. Без него линия, поднятая последним пришедшим
+    // пакетом, остаётся поднятой навсегда, если Python умер: queueTtlWord
+    // эмитит только при ИЗМЕНЕНИИ слова, а менять его больше некому.
+    std::atomic<int> watchdogTimeoutMs { 100 };
+    std::atomic<bool> watchdogTripped { false };
+    std::atomic<int64> watchdogTrips { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DualDLCLiveBridge);
 };

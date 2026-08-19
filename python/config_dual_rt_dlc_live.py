@@ -92,7 +92,15 @@ SINGLE_EMIT_BOTH_LEGS = False
 #     would flip the shape (256<->1920) and force a revert to ~2x slower eager.
 # Assumes base CROPPING is None (the camera already hardware-crops to the stripe).
 LEG_ROI_ENABLED = True
-LEG_ROI_WIDTH = 256            # px, fixed window width
+LEG_ROI_WIDTH = 448            # px, fixed window width. 448 = размер кропа,
+                               # на котором модель обучалась (crop_sampling
+                               # 448x448). Замер на 68 отложенных кадрах против
+                               # ручной разметки: ошибка 1.00 -> 0.87 px
+                               # (Wilcoxon p=5e-11), likelihood 0.840 -> 0.891
+                               # (p=4e-39), точек ниже порога доверия 5.6% ->
+                               # 3.0%. Сквозной эффект: разброс попадания в цель
+                               # 15.0% -> 11.9%. Цена 0.3 мс: инференс упирается
+                               # в накладные расходы, а не в пиксели.
 LEG_ROI_DETECT_THRESH = 0.30   # min likelihood for a hind-leg point to anchor the centre
 LEG_ROI_HOLD_FRAMES = 100      # ~1 s @100fps: HOLD at the last leg position this long (rides out turns/
                                # occlusions where legs vanish then reappear near the same X) before sweeping
@@ -205,3 +213,40 @@ DUAL_FAST_POSE_ONLY = True
 # layouts automatically fall back to the sequential path.
 DUAL_ENABLE_BATCH_INFERENCE = True
 DUAL_BATCH_FALLBACK_TO_SEQUENTIAL = True
+
+
+# --- Phase trigger: стимул в заданный ПРОЦЕНТ шага -------------------------
+# Соглашение: опора 0..100%, перенос 100..200%. Процент считается проекцией
+# текущей точки носка на усреднённую за последние N шагов траекторию
+# относительно iliac; событий в рантайме не требует.
+#
+# ВАЖНО: работает только при DUAL_OE_BRIDGE_PACKET_MODE = "ttl". Плагин
+# пересобирает TTL-слово из каждого пакета, и в бинарном pose-режиме состояния
+# линий вычисляет он сам, поэтому бит от Python будет погашен следующим кадром.
+PHASE_TRIGGER_ENABLED = False
+PHASE_TRIGGER_FPS = 100.0        # ОБЯЗАН совпадать с частотой камеры из
+                                 # config_daheng: от неё считаются все
+                                 # выдержки детектора и темп фазы
+PHASE_TRIGGER_LEG = "r"          # "l" или "r"; автовыбор не поддержан - эталон
+                                 # строится для конкретной ноги
+PHASE_TRIGGER_TARGET_PCT = 145.0  # куда целимся. Каноническое окно стимуляции
+                                 # сгибания это 100..150% (Wenger 2016,
+                                 # doi:10.1038/nm.4025), но задержка контура
+                                 # ~29 мс закрывает первые ~30 п.п. переноса:
+                                 # доступно примерно 130..150%. 145% лежит в
+                                 # доступной зоне и в лучшей по разбросу
+                                 # (130..160%, 12..17 мс). Менять только вместе
+                                 # с ускорением инференса, см.
+                                 # docs/GAIT_PHASE_PERCENT_2026-08-15.md
+PHASE_TRIGGER_TTL_LINE = 4       # 0..3 заняты has_triplet и angle-триггером
+PHASE_TRIGGER_LATENCY_MS = 28.0  # на столько экстраполируем фазу вперёд:
+                                 # инференс ~18 мс + период кадра 10 мс
+PHASE_TRIGGER_HOLD_FRAMES = 2    # сколько кадров держать линию поднятой
+PHASE_TRIGGER_REF_CYCLES = 10    # эталон насыщается на 10 циклах (~4 с ходьбы)
+PHASE_TRIGGER_MIN_GAP_PCT = 100.0  # рефрактерность: полцикла между импульсами
+PHASE_TRIGGER_EVENT_LAG = 1      # на столько кадров детектор опаздывает с
+                                 # событием; без компенсации смещение +9.5%
+PHASE_TRIGGER_MED_WIN = 1        # НЕ сглаживать: каждый кадр медианы добавляет
+                                 # свой лаг, p90 растёт 9.8 -> 17.6 -> 24.0%
+PHASE_TRIGGER_BOUT_STD_PX = 8.0  # порог признака движения: поджиг закрыт, пока
+                                 # разброс носка относительно тела ниже него

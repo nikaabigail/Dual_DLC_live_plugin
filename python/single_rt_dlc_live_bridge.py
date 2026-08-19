@@ -26,6 +26,7 @@ import dual_rt_dlc_live as dual
 import live_profiles
 import live_recorder
 import rt_dlc_live as live
+from gait_phase_trigger import PhaseTrigger
 
 
 live.config = config
@@ -380,6 +381,12 @@ def main(argv: list[str] | None = None) -> None:
         logger.info("Model bodyparts loaded: %d; bridge points=%s", len(body_parts), config.DUAL_USE_POINTS)
 
         base_cropping = effective_cropping
+        phase_trigger = PhaseTrigger(
+            logger,
+            float(getattr(config, "PHASE_TRIGGER_FPS", 100.0)),
+            bodypart_to_idx,
+        )
+
         roi_tracker: Optional[LegRoiTracker] = None
         if bool(getattr(config, "LEG_ROI_ENABLED", False)):
             if base_cropping is not None:
@@ -463,6 +470,12 @@ def main(argv: list[str] | None = None) -> None:
                 str(getattr(config, "SINGLE_PLUGIN_SIDE", "left")),
             )
 
+            phase_start = time.perf_counter()
+            phase_state = phase_trigger.update(np.asarray(pose))
+            bridge.set_phase_trigger(
+                phase_trigger.line if phase_trigger.enabled else None, phase_state)
+            profiler.observe("phase", (time.perf_counter() - phase_start) * 1000.0)
+
             pack_start = time.perf_counter()
             bridge.send(pair_result, left_runtime, right_runtime)
             profiler.observe("pack/send", (time.perf_counter() - pack_start) * 1000.0)
@@ -488,6 +501,12 @@ def main(argv: list[str] | None = None) -> None:
                     "source_drops": getattr(source, "dropped_total", 0),
                 }
                 display = live.draw_overlay(display, dual.draw_points_for_result(pose_result), metrics)
+                if phase_trigger.enabled:
+                    cv2.putText(
+                        display, phase_trigger.overlay_text(), (10, display.shape[0] - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (60, 40, 235) if phase_state else (0, 255, 255), 2, cv2.LINE_AA,
+                    )
                 if roi_tracker is not None:
                     if window is not None:
                         x1, x2, y1, y2 = window
