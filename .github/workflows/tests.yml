@@ -24,9 +24,9 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           # Боевое окружение закреплено на 3.10.11. Проверять на других версиях
           # смысла нет: код всё равно поедет только на этой.
