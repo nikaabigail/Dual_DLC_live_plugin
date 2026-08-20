@@ -158,9 +158,13 @@ def main(argv=None):
     b_end, r_end = bo[:, -1], rnd[:, -1]
     frac_bo = float(np.mean(b_end > ceiling * 0.95))
     frac_rnd = float(np.mean(r_end > ceiling * 0.95))
-    print(f"\nдоля прогонов, достигших 95% планки за {a.trials} проб:")
+    fail_bo = float(np.mean(b_end < 0.30))
+    print(f"\nдоля прогонов ({a.repeats} шт.), достигших 95% планки "
+          f"за {a.trials} проб:")
     print(f"  BO                {100 * frac_bo:.0f}%")
     print(f"  случайный перебор {100 * frac_rnd:.0f}%")
+    print(f"отказов у BO (счёт < 0.30, т.е. свалился в угол "
+          f"'почти не стимулировать'): {100 * fail_bo:.0f}%")
 
     # тёплый старт: prior с "другого животного" со сдвинутым оптимумом
     prior = []
@@ -174,7 +178,11 @@ def main(argv=None):
     warm = np.array([run_bo(a.trials, s, a.noise, space, shape, montage, limits, prior)
                      for s in range(a.repeats)])
     print(f"\nтёплый старт ({len(prior)} проб с другого животного, вес 0.3):")
-    for k in (5, 10, 15):
+    # Сравнивать раньше конца разогрева бессмысленно: там обе ветки идут по
+    # плану покрытия, просто разной длины. Перенос работает после него.
+    for k in (15, 20, 25, a.trials):
+        if k > a.trials:
+            continue
         print(f"  проба {k:>2}: без переноса {bo[:, k-1].mean():.3f}, "
               f"с переносом {warm[:, k-1].mean():.3f}")
 

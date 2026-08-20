@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from stim_optimizer import GP, StimOptimizer, expected_improvement
 from stim_params import (Bounds, Contact, Montage, PulseShape, SafetyLimits,
-                         SearchSpace, from_vector)
+                         SearchSpace, from_vector, normalized_dose)
 
 
 def setup(area_mm2: float = 0.30, max_amp: float = 700.0):
@@ -198,6 +198,204 @@ def test_finds_optimum_on_a_clean_objective():
     best, _ = opt.best()
     assert abs(best.amplitude_ua - target) < 90.0, (
         f"оптимум не найден: {best.amplitude_ua:.0f} вместо {target:.0f}")
+
+
+# --------------------------------------------------------------------------- #
+# разогрев: покрытие как гарантия, а не как везение
+# --------------------------------------------------------------------------- #
+
+def test_latin_hypercube_is_stratified():
+    """
+    По каждой оси ровно одна точка в каждой из n равных полос. Это и есть всё
+    отличие от случайной выборки, и именно оно чинит отказы.
+    """
+    opt = make_opt(seed=0)
+    n = 12
+    u = opt._latin_hypercube(n)
+    assert u.shape == (n, 4)
+    for j in range(u.shape[1]):
+        bins = np.floor(u[:, j] * n).astype(int)
+        assert len(set(bins)) == n, f"ось {j}: полосы {sorted(bins)}"
+
+
+def test_warmup_plan_covers_every_axis():
+    """
+    То же свойство, но на готовом плане, в физических единицах.
+
+    Зачем этот тест существует. Со случайным разогревом из шести точек четверть
+    прогонов на стенде заканчивалась счётом около нуля: разогрев промахивался
+    мимо узкого хребта пользы, GP выучивал только штраф за дозу и сходился в
+    угол "почти не стимулировать". Ни увеличение xi, ни принудительное
+    исследование это не лечили - лечило только гарантированное покрытие.
+    Подробности и цифры в шапке stim_optimizer.
+    """
+    for seed in range(5):
+        opt = make_opt(n_warmup=12, seed=seed)
+        plan = np.array(opt.warmup_plan())
+        assert len(plan) == 12
+        b = np.asarray(opt.space.as_bounds(), float)
+        lo, hi = b[:, 0], b[:, 1]
+        for j, name in enumerate(opt.space.names()):
+            k = np.floor((plan[:, j] - lo[j]) / (hi[j] - lo[j]) * 12).astype(int)
+            k = np.clip(k, 0, 11)
+            assert len(set(k)) == 12, f"seed {seed}, ось {name}: {sorted(k)}"
+
+
+def test_warmup_is_a_staircase_and_is_never_clipped():
+    """
+    План отсортирован по возрастанию амплитуды не для красоты: разгон не пускает
+    выше чем на шаг от опробованного. При обходе в случайном порядке высокие
+    точки срезались бы по потолку и покрытие по амплитуде разваливалось бы.
+    """
+    opt = make_opt(n_warmup=12, seed=2)
+    plan = np.array(opt.warmup_plan())
+    assert np.all(np.diff(plan[:, 0]) >= 0), "план не отсортирован по амплитуде"
+    for i in range(len(plan)):
+        p = opt.suggest()
+        assert p.amplitude_ua == pytest.approx(plan[i, 0]), (
+            f"проба {i}: разгон срезал план {plan[i, 0]:.0f} -> {p.amplitude_ua:.0f}")
+        opt.observe(p, 0.0)
+
+
+def test_transfer_does_not_shorten_warmup():
+    """
+    Соблазн засчитать чужие пробы за покрытие и начать оптимизировать раньше
+    измерен и отвергнут: укороченный разогрев давал 0.517 к пробе 15 против
+    0.548 у полного. Оптимум у каждого животного свой, чужими точками своё
+    пространство не покрывается.
+    """
+    space, shape, montage, limits = setup()
+    prior_pt = from_vector([300.0, 40.0, 100.0, 20.0], space, shape, montage)
+
+    cold = make_opt(n_warmup=6, seed=0)
+    warm = make_opt(n_warmup=6, seed=0)
+    warm.add_prior([(prior_pt, 0.5)] * 50)
+    assert len(warm.warmup_plan()) == len(cold.warmup_plan()) == 6
+
+
+# --------------------------------------------------------------------------- #
+# отклик не постоянен: забывание и правило отчёта
+# --------------------------------------------------------------------------- #
+
+def test_old_trials_are_forgotten():
+    """
+    Гауссов процесс сам одинаково верит первой пробе и последней. Животное за
+    сессию устаёт и оптимум уезжает, поэтому вес своей пробы обязан падать с
+    возрастом. Без этого промах на уезжающем оптимуме 0.193 вместо 0.126.
+    """
+    space, shape, montage, limits = setup()
+    p = from_vector([300.0, 40.0, 100.0, 20.0], space, shape, montage)
+
+    opt = make_opt(seed=0, forget_half_life=10.0)
+    for _ in range(21):
+        opt.observe(p, 0.5)
+    _, _, w = opt._observations()
+    assert w[-1] == pytest.approx(1.0), "свежая проба должна весить единицу"
+    assert w[-11] == pytest.approx(0.5, abs=1e-6), "через период - половину"
+    assert w[0] == pytest.approx(0.25, abs=1e-6), "через два периода - четверть"
+    assert np.all(np.diff(w) > 0), "вес обязан расти к свежим пробам"
+
+    off = make_opt(seed=0, forget_half_life=None)
+    for _ in range(21):
+        off.observe(p, 0.5)
+    assert np.allclose(off._observations()[2], 1.0), "выключенное забывание должно быть выключено"
+
+    # По умолчанию забывание ВКЛЮЧЕНО. Это решение по замеру, а не вкус:
+    # на неподвижной поверхности оно бесплатно, на уезжающей вдвое снижает
+    # промах. Если менять умолчание - сначала перегнать validate_stim_drift.py.
+    default = make_opt(seed=0)
+    for _ in range(21):
+        default.observe(p, 0.5)
+    w_def = default._observations()[2]
+    assert not np.allclose(w_def, 1.0), (
+        "забывание по умолчанию выключено - см. validate_stim_drift.py")
+    assert w_def[0] < 0.5 * w_def[-1]
+
+
+def test_report_uses_smoothed_prediction_not_best_observation():
+    """
+    Ловушка проклятия победителя. Отклика нет вообще - счёт это чистый шум.
+    Максимум шести десятков шумов заметно больше нуля, и если отчитываться им,
+    эффект "получается" там, где его нет: на стенде +0.130.
+
+    Правило отчёта - recommend(), сглаженное предсказание. Тест сравнивает оба
+    на одних и тех же данных, поэтому не зависит от траектории поиска.
+    """
+    space, shape, montage, limits = setup()
+    claims_naive, claims_smooth = [], []
+    for seed in range(4):
+        opt = StimOptimizer(space, shape, montage, limits, noise=0.06,
+                            seed=seed, n_candidates=256)
+        rng = np.random.default_rng(seed + 500)
+        for _ in range(40):
+            p = opt.suggest()
+            opt.observe(p, float(rng.normal(0.0, 0.06)))   # эффекта нет
+        claims_naive.append(opt.best()[1])
+        _, mu, _ = opt.recommend()
+        claims_smooth.append(mu)
+    naive, smooth = float(np.mean(claims_naive)), float(np.mean(claims_smooth))
+    assert naive > 0.08, (
+        f"стенд не воспроизводит ловушку: наивный отчёт {naive:.3f}")
+    assert smooth < 0.5 * naive, (
+        f"сглаженный отчёт {smooth:.3f} не лучше наивного {naive:.3f}")
+
+
+def _ridge_response(p, limits):
+    """
+    Стенд для проверки на отказ: узкий хребет пользы плюс гладкий штраф за дозу.
+    Ловушка именно в их сочетании - штраф выучивается легко, польза нет.
+    """
+    a = (p.amplitude_ua - 100.0) / 500.0
+    f = (p.frequency_hz - 20.0) / 60.0
+    t = (p.train_ms - 50.0) / 150.0
+    c = p.interchannel_ms / 60.0
+    eff = (np.exp(-((a - 0.55) ** 2) / 0.055)
+           * np.exp(-((f - 0.40) ** 2) / 0.10)
+           * (1.0 - np.exp(-3.0 * t))
+           * np.exp(-((c - 0.35) ** 2) / 0.20))
+    return 0.95 * eff - 0.20 * normalized_dose(p, limits)
+
+
+def test_never_collapses_to_the_minimum_dose_corner():
+    """
+    Регрессия на найденный отказ, сквозная.
+
+    "Угол" - это набор с минимальной дозой: пользы нет, штрафа тоже почти нет,
+    счёт около нуля. Для оптимизатора это локальный оптимум, из которого EI сам
+    не выходит: угол одновременно и лучший по среднему, и лучше всех изучен.
+
+    Замер в этой самой конфигурации (20 прогонов по 30 проб, 512 кандидатов):
+
+        разогрев планом по гиперкубу   1 отказ  (мин  0.048)
+        план, но точки случайные       2 отказа (мин -0.014)
+        старый код, без плана          5 отказов(мин -0.007)
+
+    Порог 2 стоит между "починено" и "старый код" с запасом в три прогона.
+    Промежуточный вариант (план из случайных точек) этот тест не ловит - его
+    стережёт test_warmup_plan_covers_every_axis, где свойство проверяется точно,
+    а не статистически.
+
+    В боевой конфигурации (4096 кандидатов, 60 проб) отказов 0 из 40, но такой
+    прогон идёт шесть минут и в наборе тестов ему не место.
+    """
+    space, shape, montage, limits = setup()
+    best = []
+    for seed in range(20):
+        opt = StimOptimizer(space, shape, montage, limits, noise=0.06,
+                            seed=seed, n_candidates=512)
+        rng = np.random.default_rng(seed + 10_000)
+        top = -np.inf
+        for _ in range(30):
+            p = opt.suggest()
+            true = _ridge_response(p, limits)
+            opt.observe(p, true + rng.normal(0.0, 0.06))
+            top = max(top, true)
+        best.append(top)
+    best = np.asarray(best)
+    bad = int((best < 0.30).sum())
+    assert bad <= 2, (
+        f"{bad} прогонов из 20 свалились в угол минимальной дозы "
+        f"(норма <= 2), худший счёт {best.min():.3f}")
 
 
 def test_prior_does_not_count_as_own_experience():
