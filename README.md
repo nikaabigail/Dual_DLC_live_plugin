@@ -1,5 +1,7 @@
 # Dual DLC Live Plugin
 
+[![tests](https://github.com/nikaabigail/Dual_DLC_live_plugin/actions/workflows/tests.yml/badge.svg)](https://github.com/nikaabigail/Dual_DLC_live_plugin/actions/workflows/tests.yml)
+
 **Версия: 2026-06-22.** Перенос наработок одно-камерного режима в dual (скользящий ROI, оверлей, восстановление координат на пару кадров) и запись сырого видео + keypoints **с двух камер**; правила достоверности кинематики в C++ плагине (полоса угла, скорость угла, смещение точки относительно сегмента hip-ankle — гасят ложный угловой TTL до стимуляции, см. [`docs/RUN_EXPERIMENT.md`](docs/RUN_EXPERIMENT.md)); запись видео переведена на lossless `.avi` (FFV1). Ранее (2026-06-18): авто-выбор видимой ноги (L/R) при развороте крысы, динамический ROI (cudagraphs сохранён, инференс ~3.5 мс), переработанный оверлей (`DLC Hz` / `infer ms`), параллельная запись сырого видео и keypoints (`.dlckp`/`.csv`, фоновый поток — без влияния на инференс).
 
 Основная задача системы: получить видеопоток с двух камер, посчитать
