@@ -98,6 +98,9 @@ def main(argv=None):
     ap.add_argument("--events", required=True, type=Path)
     ap.add_argument("--leg", default="r")
     ap.add_argument("--fps", type=float, default=100.0)
+    # Умолчание 10 оставлено, чтобы воспроизводились числа чувствительности
+    # в отчёте. Рабочая точка эксперимента - ШЕСТЬ шагов: по записям с ней
+    # сессия вдвое короче при том же результате (см. session_budget.py).
     ap.add_argument("--cycles-per-trial", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
