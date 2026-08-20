@@ -273,6 +273,73 @@ def test_transfer_does_not_shorten_warmup():
     assert len(warm.warmup_plan()) == len(cold.warmup_plan()) == 6
 
 
+# --------------------------------------------------------------------------- #
+# отклик не постоянен: забывание и правило отчёта
+# --------------------------------------------------------------------------- #
+
+def test_old_trials_are_forgotten():
+    """
+    Гауссов процесс сам одинаково верит первой пробе и последней. Животное за
+    сессию устаёт и оптимум уезжает, поэтому вес своей пробы обязан падать с
+    возрастом. Без этого промах на уезжающем оптимуме 0.193 вместо 0.126.
+    """
+    space, shape, montage, limits = setup()
+    p = from_vector([300.0, 40.0, 100.0, 20.0], space, shape, montage)
+
+    opt = make_opt(seed=0, forget_half_life=10.0)
+    for _ in range(21):
+        opt.observe(p, 0.5)
+    _, _, w = opt._observations()
+    assert w[-1] == pytest.approx(1.0), "свежая проба должна весить единицу"
+    assert w[-11] == pytest.approx(0.5, abs=1e-6), "через период - половину"
+    assert w[0] == pytest.approx(0.25, abs=1e-6), "через два периода - четверть"
+    assert np.all(np.diff(w) > 0), "вес обязан расти к свежим пробам"
+
+    off = make_opt(seed=0, forget_half_life=None)
+    for _ in range(21):
+        off.observe(p, 0.5)
+    assert np.allclose(off._observations()[2], 1.0), "выключенное забывание должно быть выключено"
+
+    # По умолчанию забывание ВКЛЮЧЕНО. Это решение по замеру, а не вкус:
+    # на неподвижной поверхности оно бесплатно, на уезжающей вдвое снижает
+    # промах. Если менять умолчание - сначала перегнать validate_stim_drift.py.
+    default = make_opt(seed=0)
+    for _ in range(21):
+        default.observe(p, 0.5)
+    w_def = default._observations()[2]
+    assert not np.allclose(w_def, 1.0), (
+        "забывание по умолчанию выключено - см. validate_stim_drift.py")
+    assert w_def[0] < 0.5 * w_def[-1]
+
+
+def test_report_uses_smoothed_prediction_not_best_observation():
+    """
+    Ловушка проклятия победителя. Отклика нет вообще - счёт это чистый шум.
+    Максимум шести десятков шумов заметно больше нуля, и если отчитываться им,
+    эффект "получается" там, где его нет: на стенде +0.130.
+
+    Правило отчёта - recommend(), сглаженное предсказание. Тест сравнивает оба
+    на одних и тех же данных, поэтому не зависит от траектории поиска.
+    """
+    space, shape, montage, limits = setup()
+    claims_naive, claims_smooth = [], []
+    for seed in range(4):
+        opt = StimOptimizer(space, shape, montage, limits, noise=0.06,
+                            seed=seed, n_candidates=256)
+        rng = np.random.default_rng(seed + 500)
+        for _ in range(40):
+            p = opt.suggest()
+            opt.observe(p, float(rng.normal(0.0, 0.06)))   # эффекта нет
+        claims_naive.append(opt.best()[1])
+        _, mu, _ = opt.recommend()
+        claims_smooth.append(mu)
+    naive, smooth = float(np.mean(claims_naive)), float(np.mean(claims_smooth))
+    assert naive > 0.08, (
+        f"стенд не воспроизводит ловушку: наивный отчёт {naive:.3f}")
+    assert smooth < 0.5 * naive, (
+        f"сглаженный отчёт {smooth:.3f} не лучше наивного {naive:.3f}")
+
+
 def _ridge_response(p, limits):
     """
     Стенд для проверки на отказ: узкий хребет пользы плюс гладкий штраф за дозу.

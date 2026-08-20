@@ -200,7 +200,8 @@ class StimOptimizer:
                  limits: SafetyLimits, *, noise: float = 0.06, seed: int = 0,
                  n_warmup: int = 6, max_amplitude_step_ua: float = 100.0,
                  prior_weight: float = 0.3, n_candidates: int = 4096,
-                 explore_every: int = 5, fixed: Optional[dict] = None):
+                 explore_every: int = 5, forget_half_life: Optional[float] = 15.0,
+                 fixed: Optional[dict] = None):
         self.space = space
         self.shape = shape
         self.montage = montage
@@ -212,6 +213,8 @@ class StimOptimizer:
         self.prior_weight = float(prior_weight)
         self.n_candidates = int(n_candidates)
         self.explore_every = int(explore_every)
+        self.forget_half_life = (None if forget_half_life is None
+                                 else float(forget_half_life))
         self.fixed = dict(fixed or {})
         self.trials: list[Trial] = []
         self._bounds = np.asarray(space.as_bounds(), float)
@@ -325,10 +328,7 @@ class StimOptimizer:
             # план оказался короче нормы (небезопасные точки) - добираем случайно
             return self._params(self._to_real(cand[self.rng.integers(len(cand))]))
 
-        x = np.array([self._to_unit(t.vector) for t in self.trials])
-        y = np.array([t.score for t in self.trials])
-        w = np.array([1.0 if t.source == "self" else self.prior_weight
-                      for t in self.trials])
+        x, y, w = self._observations()
         gp = GP(noise=self.noise).fit(x, y, w)
         mu, sd = gp.predict(cand)
 
@@ -348,6 +348,79 @@ class StimOptimizer:
         ei = expected_improvement(mu, sd, best)
         return self._params(self._to_real(cand[int(np.argmax(ei))]))
 
+    def _observations(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Точки, счёта и веса для GP.
+
+        Вес чужой пробы понижен всегда. Вес своей падает вдвое каждые
+        forget_half_life проб, потому что отклик за сессию НЕ постоянен:
+        животное устаёт, порог растёт, оптимум уезжает. Гауссов процесс сам по
+        себе такого не умеет - он одинаково верит первой пробе и последней.
+
+        Цена и польза измерены (validate_stim_drift.py, 50 прогонов по 60 проб,
+        промах рекомендации на поверхности, какой она стала к концу):
+
+            поверхность   помнит всё   забывает T½=15
+            неподвижная      0.033         0.036       <- страховка стоит 0.003
+            усталость        0.037         0.042
+            уезд оптимума    0.193         0.126       <- ради этого и включено
+
+        Завышение отчёта при этом падает всюду: на уезде с 0.121 до 0.022, при
+        усталости с 0.189 до 0.073.
+
+        Сам период подобран, а не назначен (40 прогонов, успех / промах):
+
+            T½      неподвижная      уезд оптимума
+            нет     92% / 0.034      70% / 0.196
+            15      92% / 0.036      78% / 0.124   <- взято
+            25      90% / 0.041      72% / 0.151
+            40      90% / 0.042      72% / 0.159
+
+        Пятнадцать лучше и более длинных, и более коротких периодов: на
+        неподвижной поверхности разницы с "не забывать" нет вовсе, на уезжающей
+        промах падает почти вдвое.
+        """
+        x = np.array([self._to_unit(t.vector) for t in self.trials])
+        y = np.array([t.score for t in self.trials])
+        own_idx = [i for i, t in enumerate(self.trials) if t.source == "self"]
+        w = np.full(len(self.trials), self.prior_weight)
+        w[own_idx] = 1.0
+        if self.forget_half_life:
+            n = len(own_idx)
+            for k, i in enumerate(own_idx):
+                age = n - 1 - k
+                w[i] = max(0.5 ** (age / self.forget_half_life), 1e-3)
+        return x, y, w
+
+    def recommend(self) -> tuple[Optional[StimParams], float, float]:
+        """
+        Что реально применять по итогам сессии: точка с наибольшим СГЛАЖЕННЫМ
+        предсказанием, а не с наибольшим наблюдением.
+
+        Разница не косметическая, она измерена. На поверхности, где эффекта
+        НЕТ ВООБЩЕ, наивное правило отчитывается о +0.130 - выдуманный эффект
+        размером примерно с половину настоящего. Сглаженное даёт +0.004.
+
+            правило отчёта      неподвижная    эффекта нет
+            максимум наблюдений    +0.094         +0.130
+            сглаженное             -0.007         +0.004
+
+        Причина - проклятие победителя: максимум зашумлённых наблюдений тем
+        выше, чем больше проб. Отчитываться им нельзя.
+
+        Возвращает (набор, предсказанный счёт, неопределённость предсказания).
+        """
+        own = [t for t in self.trials if t.source == "self"]
+        if not own:
+            return None, float("-inf"), float("inf")
+        cand = self._candidates()
+        x, y, w = self._observations()
+        gp = GP(noise=self.noise).fit(x, y, w)
+        pts = np.vstack([cand, np.array([self._to_unit(t.vector) for t in own])])             if cand.size else np.array([self._to_unit(t.vector) for t in own])
+        mu, sd = gp.predict(pts)
+        i = int(np.argmax(mu))
+        return self._params(self._to_real(pts[i])), float(mu[i]), float(sd[i])
+
     def observe(self, params: StimParams, score: float, source: str = "self") -> None:
         v = np.array([getattr(params, n) for n in self._names], float)
         self.trials.append(Trial(params=params, score=float(score),
@@ -359,6 +432,13 @@ class StimOptimizer:
             self.observe(p, s, source="prior")
 
     def best(self) -> tuple[Optional[StimParams], float]:
+        """
+        Лучшая ПРОБА за сессию. Для отчёта не годится - см. recommend().
+
+        Наблюдение выбрано максимумом, поэтому оно систематически завышено:
+        на стенде +0.094 при неподвижном отклике и +0.130 там, где эффекта нет
+        вообще. Метод оставлен для журнала проб и отладки.
+        """
         own = [t for t in self.trials if t.source == "self"]
         if not own:
             return None, float("-inf")
