@@ -75,8 +75,8 @@ cd C:\dlc\Dual_DLC_live_plugin
 целью `DualDLCLiveBridge_tests` внутри дерева plugin-GUI:
 
 ```powershell
-$G = "C:\path	o\plugin-GUI"
-$vc = "C:\Program Files\Microsoft Visual Studio8\Insiders\VC\Auxiliary\Buildcvars64.bat"
+$G = "C:\path\to\plugin-GUI"
+$vc = "C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvars64.bat"
 
 # исходники плагина + тесты кладём в дерево GUI
 Copy-Item open_ephys_plugin\DualDLCLiveBridge\* "$G\Plugins\DualDLCLiveBridge\" -Recurse -Force

@@ -39,3 +39,6 @@ jobs:
 
       - name: Тесты
         run: python -m pytest python/tests -q
+
+      - name: Экспериментальная обработка колена и ограничение очереди
+        run: python -m unittest discover -s experiments/knee_slow_loop -p "test_*.py" -v

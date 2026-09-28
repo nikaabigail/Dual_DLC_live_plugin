@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from config_rt_dlc_live import *  # noqa: F401,F403
+from pose_layout import LEGACY_BRIDGE_POINT_NAMES
 
 
 # ============================================================================
@@ -58,7 +59,7 @@ DUAL_DEFAULT_CAMERA_SIDE = {
     "left": "left",
     "right": "right",
 }
-DUAL_USE_POINTS = sorted({point for points in DUAL_SIDE_POINT_SETS.values() for point in points})
+DUAL_USE_POINTS = list(LEGACY_BRIDGE_POINT_NAMES)
 
 # Single-camera mode: one side camera sees only ONE hind leg at a time (the
 # rat's near flank), even though the model emits both hl_*_l and hl_*_r (the
@@ -178,6 +179,9 @@ DUAL_OE_BRIDGE_SEND_EVERY_N_RESULTS = 1
 DUAL_OE_BRIDGE_PACKET_MODE = "pose"
 DUAL_OE_BRIDGE_WIRE_FORMAT = "binary"  # "binary" or "json"; binary is used only with packet_mode="pose".
 DUAL_OE_BRIDGE_REQUEST_ACK = False
+# DDLP/v1 count=8 appends left/right knees to the unchanged six-point layout.
+# Requires a receiver supporting that extension; legacy profiles send count=6.
+DUAL_OE_BRIDGE_INCLUDE_KNEES = False
 DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG = None
 
 

@@ -71,6 +71,9 @@ PRECISION = "FP32"
 DEVICE = "cuda"
 SINGLE_ANIMAL = True
 CONVERT_TO_RGB = True
+# Opt-in for models trained with constant-zero padding. Legacy DLCLive
+# preprocessing is untouched unless a profile explicitly enables this.
+MODEL_CONSTANT_ZERO_PADDING = False
 
 # ============================================================================
 # Official DLCLive preprocessing

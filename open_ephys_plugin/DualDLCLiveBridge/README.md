@@ -61,7 +61,7 @@ dual_rt_dlc_live.py
 Open Ephys tree:
 
 ```text
-C:\Users\Владимир\Desktop\plugin-GUI-main\plugin-GUI-main
+C:\path\to\plugin-GUI
   Plugins\DualDLCLiveBridge
   out\build\x64-Debug\plugins\DualDLCLiveBridge.dll
 ```
@@ -93,7 +93,7 @@ add_subdirectory(DualDLCLiveBridge)
 | `enable_despike` | `true` | Отбрасывает резкие скачки точки. |
 | `despike_threshold_px` | `150.0` | Максимальный разрешенный скачок точки. |
 | `despike_reset_gap_frames` | `15` | Через сколько кадров разрешить reacquire после пропажи. |
-| `median_window` | `3` | Размер медианного окна. |
+| `median_window` | `3` | Окно в кадрах источника: возраст принятого наблюдения должен быть меньше этого значения. |
 | `enable_hold` | `false` | Удерживать последнюю хорошую точку при короткой пропаже. |
 | `max_hold_frames` | `20` | Сколько кадров можно удерживать точку. |
 | `refractory_ms` | `0` | Минимальный интервал между rising edges angle trigger. |
@@ -270,7 +270,12 @@ schema "dual_dlc_live.pose.v1"
 - left side block;
 - right side block.
 
-Если `version != 1` или `point_count != 6`, пакет отклоняется.
+В v0.2.0-rc2 принимаются `version = 1` и `point_count = 6` либо `8`.
+Первые шесть строк и их порядок сохранены; при `point_count = 8` в конце
+добавляются `hl_knee_l`, `hl_knee_r`. Колени проходят тот же `filterPoint`,
+но не меняют старые триплеты, углы и выбор стороны. Старый приёмник,
+поддерживающий только шесть точек, не подходит для расширенного профиля.
+Остальные версии и количества точек отклоняются.
 
 Для каждой стороны плагин собирает:
 
@@ -306,8 +311,8 @@ evaluateSidePosePoints(...)
 2. Если `enable_pcutoff = true`, отбрасывает likelihood ниже `conf_thresh_use`.
 3. Если `enable_despike = true`, сравнивает скачок с `despike_threshold_px`.
 4. Если скачок слишком большой, но gap больше `despike_reset_gap_frames`, разрешает reacquire.
-5. Добавляет точку в median buffer.
-6. Возвращает медианную координату за `median_window`.
+5. Удаляет из median buffer координаты возрастом `>= median_window` кадров и добавляет принятую точку с её `frame_id`. При повторном обнаружении после reset gap или перезапуске счётчика начинает новый буфер.
+6. Возвращает медианную координату из свежих принятых наблюдений. При окне 3 учитываются текущий и два предыдущих кадра источника, а не три последние удачные детекции любой давности.
 7. Если точка пропала и `enable_hold = true`, временно возвращает последнюю хорошую точку до `max_hold_frames`.
 
 Если `use_filter = false`, фильтр отключается, но confidence/triplet проверка
@@ -465,14 +470,14 @@ pkts 120 | mode bin | pair 120 | ttl 0x03 | L 135.0 | R 135.0 | q 0 | age 4ms
 Закрыть Open Ephys перед сборкой, иначе DLL может быть занята.
 
 ```powershell
-cd C:\Users\Владимир\Desktop\plugin-GUI-main\plugin-GUI-main
+cd C:\path\to\plugin-GUI
 cmd.exe /s /c "`"C:\Program Files\Microsoft Visual Studio\18\Insiders\Common7\Tools\VsDevCmd.bat`" -arch=x64 && cmake --build out\build\x64-Debug --target DualDLCLiveBridge --config Debug"
 ```
 
 Smoke-test DLL:
 
 ```powershell
-cd C:\Users\Владимир\Desktop\plugin-GUI-main\plugin-GUI-main
+cd C:\path\to\plugin-GUI
 C:\dlc_live_env\Scripts\python.exe -B Plugins\DualDLCLiveBridge\check_plugin_load.py
 ```
 

@@ -23,6 +23,7 @@ import numpy as np
 import config_dual_rt_dlc_live as config
 import live_profiles
 import rt_dlc_live as live
+from pose_layout import KNEE_BRIDGE_POINT_NAMES, LEGACY_BRIDGE_POINT_NAMES
 
 
 live.config = config
@@ -31,14 +32,8 @@ live.config = config
 BINARY_POSE_MAGIC = b"DDLP"
 BINARY_POSE_VERSION = 1
 BINARY_FLAG_ACK = 1 << 0
-BINARY_POSE_POINT_NAMES = [
-    "hl_ankle_l",
-    "hl_ankle_r",
-    "hl_hip_l",
-    "hl_hip_r",
-    "hl_toes_l",
-    "hl_toes_r",
-]
+BINARY_POSE_POINT_NAMES = list(LEGACY_BRIDGE_POINT_NAMES)
+BINARY_POSE_KNEE_POINT_NAMES = list(KNEE_BRIDGE_POINT_NAMES)
 BINARY_HEADER_STRUCT = struct.Struct("<4sHHqdffHH")
 BINARY_SIDE_STRUCT = struct.Struct("<qqdfIHH")
 BINARY_POINT_STRUCT = struct.Struct("<fff")
@@ -132,6 +127,8 @@ class OpenEphysBridge:
         self.packet_mode = str(getattr(config, "DUAL_OE_BRIDGE_PACKET_MODE", "pose")).strip().lower()
         self.wire_format = str(getattr(config, "DUAL_OE_BRIDGE_WIRE_FORMAT", "json")).strip().lower()
         self.request_ack = bool(getattr(config, "DUAL_OE_BRIDGE_REQUEST_ACK", False))
+        if self.packet_mode == "pose" and self.wire_format == "binary":
+            validate_bridge_point_layout()
         threshold = getattr(config, "DUAL_OE_BRIDGE_ANGLE_THRESHOLD_DEG", None)
         self.angle_threshold_deg = None if threshold is None else float(threshold)
         self.sock: Optional[socket.socket] = None
@@ -516,10 +513,20 @@ def validate_dual_config() -> None:
     bridge_wire = str(getattr(config, "DUAL_OE_BRIDGE_WIRE_FORMAT", "json")).strip().lower()
     if bridge_wire not in {"binary", "json"}:
         raise ValueError('DUAL_OE_BRIDGE_WIRE_FORMAT must be "binary" or "json".')
-    if bridge_wire == "binary" and list(config.DUAL_USE_POINTS) != BINARY_POSE_POINT_NAMES:
+    validate_bridge_point_layout()
+
+
+def validate_bridge_point_layout() -> None:
+    """Validate the opted-in DDLP layout independently of attached cameras."""
+    if str(getattr(config, "DUAL_OE_BRIDGE_WIRE_FORMAT", "json")).strip().lower() != "binary":
+        return
+    with_knees = bool(getattr(config, "DUAL_OE_BRIDGE_INCLUDE_KNEES", False))
+    expected = BINARY_POSE_KNEE_POINT_NAMES if with_knees else BINARY_POSE_POINT_NAMES
+    if list(config.DUAL_USE_POINTS) != expected:
         raise ValueError(
-            "Binary Open Ephys bridge packets use a fixed point order. "
-            "Set DUAL_OE_BRIDGE_WIRE_FORMAT='json' for custom DUAL_USE_POINTS."
+            f"Binary Open Ephys bridge expects point order {expected} "
+            f"with DUAL_OE_BRIDGE_INCLUDE_KNEES={with_knees}. "
+            "Use the matching profile, or JSON for custom DUAL_USE_POINTS."
         )
 
 

@@ -705,6 +705,8 @@ bool DualDLCLiveBridge::applyPoseMessage (const var& parsed, uint8& ttlWord)
 
     lastLeftAngleDeg.store (left.hasAngle ? left.angleDeg : -1.0);
     lastRightAngleDeg.store (right.hasAngle ? right.angleDeg : -1.0);
+    nativePoseSnapshot.pairIndex = (int64) parsed.getProperty ("pair_index", var (-1));
+    nativePoseSnapshot.ttlWord = ttlWord;
     return true;
 }
 
@@ -740,15 +742,19 @@ bool DualDLCLiveBridge::applyBinaryPosePacket (const char* data,
     if (version != binaryPoseVersion)
         return false;
 
-    const std::array<String, 6> pointNames {{
+    // DDLP/v1 extension: the six legacy rows retain their exact order.
+    // An optional final pair carries knees without changing angle/TTL logic.
+    const std::array<String, 8> pointNames {{
         "hl_ankle_l",
         "hl_ankle_r",
         "hl_hip_l",
         "hl_hip_r",
         "hl_toes_l",
         "hl_toes_r",
+        "hl_knee_l",
+        "hl_knee_r",
     }};
-    if (pointCount != pointNames.size())
+    if (pointCount != 6 && pointCount != pointNames.size())
         return false;
 
     struct BinarySide
@@ -780,7 +786,7 @@ bool DualDLCLiveBridge::applyBinaryPosePacket (const char* data,
 
         ignoreUnused (sourceFrameId, captureTs, inferMs, drops, rawVisible, sideReserved);
         side.frameId = (int64) frameId;
-        for (size_t index = 0; index < pointNames.size(); index++)
+        for (size_t index = 0; index < pointCount; index++)
         {
             float x = 0.0f;
             float y = 0.0f;
@@ -844,6 +850,47 @@ bool DualDLCLiveBridge::applyBinaryPosePacket (const char* data,
     lastRightAngleDeg.store (right.hasAngle ? right.angleDeg : -1.0);
     pairIndex = (int64) packetPairIndex;
     requestAck = (flags & binaryFlagAck) != 0;
+    nativePoseSnapshot.pairIndex = pairIndex;
+    nativePoseSnapshot.ttlWord = ttlWord;
+    return true;
+}
+
+DualDLCLiveBridge::NativePoseSnapshot DualDLCLiveBridge::getNativePoseSnapshot()
+{
+    const ScopedLock lock (poseStateLock);
+    return nativePoseSnapshot;
+}
+
+bool DualDLCLiveBridge::replayBinaryPosePacketOffline (const char* data,
+                                                       int numBytes,
+                                                       NativePoseSnapshot& snapshot)
+{
+    const ScopedLock socketGuard (socketLock);
+    if (socket != nullptr || isThreadRunning() || data == nullptr || numBytes < 36
+        || std::memcmp (data, "DDLP", 4) != 0)
+        return false;
+
+    uint8 ttlWord = 0;
+    int64 pairIndex = -1;
+    bool requestAck = false;
+    if (! applyBinaryPosePacket (data, numBytes, ttlWord, pairIndex, requestAck))
+        return false;
+    snapshot = getNativePoseSnapshot();
+    return true;
+}
+
+bool DualDLCLiveBridge::replayJsonPosePacketOffline (const String& message, NativePoseSnapshot& snapshot)
+{
+    const ScopedLock socketGuard (socketLock);
+    if (socket != nullptr || isThreadRunning())
+        return false;
+    const var parsed = JSON::parse (message);
+    if (! parsed.isObject() || parsed.getProperty ("schema", var()).toString() != "dual_dlc_live.pose.v1")
+        return false;
+    uint8 ttlWord = 0;
+    if (! applyPoseMessage (parsed, ttlWord))
+        return false;
+    snapshot = getNativePoseSnapshot();
     return true;
 }
 
@@ -854,6 +901,7 @@ DualDLCLiveBridge::SidePoseResult DualDLCLiveBridge::evaluateSidePose (const var
 {
     SidePoseResult result;
     result.pickedSide = cameraName;
+    (cameraName == "right" ? nativePoseSnapshot.right : nativePoseSnapshot.left) = NativeSideSnapshot {};
 
     if (! sideObject.isObject())
         return result;
@@ -889,6 +937,9 @@ DualDLCLiveBridge::SidePoseResult DualDLCLiveBridge::evaluateSidePose (const var
     PosePointMap rawPointMap;
     for (const String& name : pointNames)
         rawPointMap[pointKey (name)] = readPosePoint (rawPoints, name);
+    for (const String name : { String ("hl_knee_l"), String ("hl_knee_r") })
+        if (rawPoints.getProperty (name, var()).isObject())
+            rawPointMap[pointKey (name)] = readPosePoint (rawPoints, name);
 
     return evaluateSidePosePoints (rawPointMap, frameId, cameraName, triplets, filterStates);
 }
@@ -928,6 +979,15 @@ DualDLCLiveBridge::SidePoseResult DualDLCLiveBridge::evaluateSidePosePoints (con
     for (const String& name : pointNames)
         filteredPoints[pointKey (name)] = filterPoint (name, pointFromMap (rawPoints, name), frameId, filterStates);
 
+    // Optional knees share the exact native point filter, with independent
+    // state keys. They never participate in side scores or the old angle.
+    for (const String name : { String ("hl_knee_l"), String ("hl_knee_r") })
+    {
+        if (rawPoints.find (pointKey (name)) != rawPoints.end()
+            && filteredPoints.find (pointKey (name)) == filteredPoints.end())
+            filteredPoints[pointKey (name)] = filterPoint (name, pointFromMap (rawPoints, name), frameId, filterStates);
+    }
+
     const auto leftScore = scoreTriplet (filteredPoints, triplets.left);
     const auto rightScore = scoreTriplet (filteredPoints, triplets.right);
     const bool useRight = rightScore.first > leftScore.first
@@ -957,6 +1017,14 @@ DualDLCLiveBridge::SidePoseResult DualDLCLiveBridge::evaluateSidePosePoints (con
     // still re-anchors when the picked leg flips L<->R within this one camera.
     SideValidityState& validity = (cameraName == "right") ? rightValidity : leftValidity;
     applyValidityGates (result, validity, hip, ankle, toes, frameId);
+
+    NativeSideSnapshot& snapshot = cameraName == "right" ? nativePoseSnapshot.right : nativePoseSnapshot.left;
+    snapshot.frameId = frameId;
+    snapshot.hasTriplet = result.hasTriplet;
+    snapshot.hasAngle = result.hasAngle;
+    snapshot.angleDeg = result.angleDeg;
+    snapshot.pickedSide = result.pickedSide;
+    snapshot.points = std::move (filteredPoints);
 
     return result;
 }
@@ -1133,29 +1201,54 @@ DualDLCLiveBridge::PosePoint DualDLCLiveBridge::filterPoint (const String& name,
     bool isGood = rawPoint.valid
                   && ((! getBoolParam ("enable_pcutoff", true))
                       || rawPoint.likelihood >= (double) getFloatParam ("conf_thresh_use", 0.20f));
+    const int64 gap = state.hasLastGood ? frameId - state.lastGoodFrameId : 0;
+    // A reacquired point starts a new median segment. Retaining old samples
+    // would mix locations from before/after an occlusion or camera-side route
+    // switch, even when the current raw prediction is already correct.
+    // A decreasing frame counter likewise starts a new segment; a duplicate
+    // frame id alone is not evidence of a new acquisition session.
+    const bool reacquiring = state.hasLastGood
+                             && (gap > (int64) getIntParam ("despike_reset_gap_frames", 15)
+                                 || gap < 0);
 
     if (isGood && getBoolParam ("enable_despike", true) && state.hasLastGood)
     {
         const double jump = std::hypot (rawPoint.x - state.lastGoodX, rawPoint.y - state.lastGoodY);
-        const int64 gap = frameId - state.lastGoodFrameId;
-        const bool allowReacquire = gap > (int64) getIntParam ("despike_reset_gap_frames", 15);
-        if (jump > (double) getFloatParam ("despike_threshold_px", 150.0f) && ! allowReacquire)
+        if (jump > (double) getFloatParam ("despike_threshold_px", 150.0f) && ! reacquiring)
             isGood = false;
     }
 
     if (isGood)
     {
+        if (reacquiring)
+        {
+            state.xHist.clear();
+            state.yHist.clear();
+            state.frameHist.clear();
+        }
         const int medianWindow = jmax (1, getIntParam ("median_window", 3));
+        // The window is measured in FRAME IDS, not accepted observations.
+        // Missing detections / inactive camera routes must not preserve old
+        // coordinates indefinitely and later mix them into a new location.
+        while (! state.frameHist.empty() && frameId - state.frameHist.front() >= medianWindow)
+        {
+            state.xHist.pop_front();
+            state.yHist.pop_front();
+            state.frameHist.pop_front();
+        }
         state.hasLastGood = true;
         state.lastGoodX = rawPoint.x;
         state.lastGoodY = rawPoint.y;
         state.lastGoodFrameId = frameId;
         state.xHist.push_back (rawPoint.x);
         state.yHist.push_back (rawPoint.y);
-        while ((int) state.xHist.size() > medianWindow)
+        state.frameHist.push_back (frameId);
+        while ((int) state.frameHist.size() > medianWindow)
+        {
             state.xHist.pop_front();
-        while ((int) state.yHist.size() > medianWindow)
             state.yHist.pop_front();
+            state.frameHist.pop_front();
+        }
 
         PosePoint filtered = rawPoint;
         filtered.x = medianValue (state.xHist);
@@ -1232,6 +1325,7 @@ void DualDLCLiveBridge::resetPoseFilters()
     rightFilterStates.clear();
     leftValidity = SideValidityState {};
     rightValidity = SideValidityState {};
+    nativePoseSnapshot = NativePoseSnapshot {};
     for (auto& line : lastTriggerTimeMs)
         line.store (0);
 }

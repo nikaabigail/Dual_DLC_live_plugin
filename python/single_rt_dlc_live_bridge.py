@@ -27,6 +27,7 @@ import live_profiles
 import live_recorder
 import rt_dlc_live as live
 from gait_phase_trigger import PhaseTrigger
+from pose_layout import LEGACY_ROI_ANCHOR_NAMES
 
 
 live.config = config
@@ -127,6 +128,25 @@ class LegRoiTracker:
                 self.cx = base + self.width
                 if self.cx > self.fw:
                     self.cx = self.width / 2.0
+
+
+def leg_roi_indices(body_parts: list[str]) -> list[int]:
+    """Keep the native ROI driven by the original eight hind-leg landmarks."""
+    return [i for i, name in enumerate(body_parts) if name in LEGACY_ROI_ANCHOR_NAMES]
+
+
+def build_leg_roi_tracker(body_parts: list[str], frame_shape: tuple) -> Optional[LegRoiTracker]:
+    """Shared live/file-video construction; no separate offline tracking policy."""
+    if not bool(getattr(config, "LEG_ROI_ENABLED", False)):
+        return None
+    return LegRoiTracker(
+        frame_w=int(frame_shape[1]), frame_h=int(frame_shape[0]),
+        leg_indices=leg_roi_indices(body_parts),
+        width=int(getattr(config, "LEG_ROI_WIDTH", 256)),
+        detect_thresh=float(getattr(config, "LEG_ROI_DETECT_THRESH", 0.30)),
+        hold_frames=int(getattr(config, "LEG_ROI_HOLD_FRAMES", 100)),
+        center_ema=float(getattr(config, "LEG_ROI_CENTER_EMA", 0.35)),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -391,20 +411,10 @@ def main(argv: list[str] | None = None) -> None:
         if bool(getattr(config, "LEG_ROI_ENABLED", False)):
             if base_cropping is not None:
                 logger.warning("LEG_ROI_ENABLED ignores a non-None base CROPPING; window uses camera-frame coords.")
-            leg_indices = [i for i, name in enumerate(body_parts) if str(name).startswith("hl_")]
-            frame_h, frame_w = packet.frame.shape[0], packet.frame.shape[1]
-            roi_tracker = LegRoiTracker(
-                frame_w=frame_w,
-                frame_h=frame_h,
-                leg_indices=leg_indices,
-                width=int(getattr(config, "LEG_ROI_WIDTH", 256)),
-                detect_thresh=float(getattr(config, "LEG_ROI_DETECT_THRESH", 0.30)),
-                hold_frames=int(getattr(config, "LEG_ROI_HOLD_FRAMES", 100)),
-                center_ema=float(getattr(config, "LEG_ROI_CENTER_EMA", 0.35)),
-            )
+            roi_tracker = build_leg_roi_tracker(body_parts, packet.frame.shape)
             logger.info(
                 "Leg ROI enabled: width=%d/%d thresh=%.2f hold_frames=%d ema=%.2f hind_points=%d",
-                roi_tracker.width, frame_w, roi_tracker.thresh, roi_tracker.hold_frames, roi_tracker.ema, len(leg_indices),
+                roi_tracker.width, roi_tracker.fw, roi_tracker.thresh, roi_tracker.hold_frames, roi_tracker.ema, len(roi_tracker.leg_idx),
             )
 
         recorder: Optional[live_recorder.ParallelRecorder] = None
