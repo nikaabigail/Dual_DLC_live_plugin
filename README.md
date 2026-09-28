@@ -1,5 +1,21 @@
 # Dual DLC Live Plugin
 
+**v0.2.0-rc2 — колени:** опциональная модель на 17 точек, прежний ROI и
+штатная C++-постобработка двух дополнительных коленей. Исправлен сброс устаревшей
+медианной истории после потери точки; поддержка шеститочечного режима сохранена.
+[Подключение и воспроизводимый просмотр с ROI](docs/KNEES_V0_2_0.md).
+
+[Релиз, DLL и веса модели](https://github.com/nikaabigail/Dual_DLC_live_plugin/releases/tag/v0.2.0-rc2)
+· [Изменения](CHANGELOG.md) · [Карточка модели](docs/KNEE_MODEL_CARD.md)
+· [Проверки 28.09.2026](docs/VALIDATION_2026_09_28.md).
+
+Геометрическая поправка и сглаживание колена для медленной петли опубликованы
+отдельно в [экспериментальном модуле](experiments/knee_slow_loop/README.md).
+Они **не подключены к live-профилям и TTL**. На 47 размеченных кадрах уменьшилось
+расхождение с геометрически подсказанной разметкой; это не доказательство
+анатомической точности. Нулевое влияние параллельной обработки на задержку
+быстрой ветки пока не подтверждено.
+
 [![tests](https://github.com/nikaabigail/Dual_DLC_live_plugin/actions/workflows/tests.yml/badge.svg)](https://github.com/nikaabigail/Dual_DLC_live_plugin/actions/workflows/tests.yml)
 
 **Замкнутый контур для эпидуральной стимуляции спинного мозга у крысы на
@@ -510,7 +526,7 @@ queueTtlWord(ttlWord)
 Нужен Open Ephys из debug build:
 
 ```powershell
-cd C:\Users\Владимир\Desktop\plugin-GUI-main\plugin-GUI-main\out\build\x64-Debug
+cd C:\path\to\plugin-GUI\out\build\x64-Debug
 .\open-ephys.exe
 ```
 

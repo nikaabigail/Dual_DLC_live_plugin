@@ -32,7 +32,7 @@ extern "C" EXPORT void getLibInfo (Plugin::LibraryInfo* info)
 {
     info->apiVersion = PLUGIN_API_VER;
     info->name = "Dual DLCLive Bridge";
-    info->libVersion = ProjectInfo::versionString;
+    info->libVersion = "0.2.0-rc2";
     info->numPlugins = NUM_PLUGINS;
 }
 

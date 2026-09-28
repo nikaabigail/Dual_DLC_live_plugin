@@ -670,6 +670,36 @@ def normalize_cropping_for_frame(
     return None
 
 
+def constant_padding_config(model_cfg: dict) -> dict[str, int]:
+    """Validate the exact opt-in padding contract stored with the new model."""
+    padding = model_cfg.get("data", {}).get("inference", {}).get("auto_padding", {})
+    if (
+        padding.get("position") != "top_left"
+        or padding.get("border_mode") != "constant"
+        or padding.get("border_value") != 0
+    ):
+        raise ValueError("MODEL_CONSTANT_ZERO_PADDING requires model-declared top_left constant-zero auto_padding.")
+    divisors = {key: int(padding.get(key, 1)) for key in ("pad_height_divisor", "pad_width_divisor")}
+    if any(value < 1 for value in divisors.values()):
+        raise ValueError("Model padding divisors must be positive.")
+    return divisors
+
+
+def pad_frame_for_model(frame: np.ndarray, padding: dict[str, int]) -> np.ndarray:
+    """Pad AFTER native crop/resize, only bottom/right; preserve coordinate origin.
+
+    DLCLive 1.1.0 hardcodes reflect in AutoPadToDivisor. Giving it an already
+    divisible image makes that transform a no-op, matching this model's training
+    preprocessing while retaining its native normalization and coordinate return.
+    """
+    height, width = frame.shape[:2]
+    pad_h = (-height) % padding["pad_height_divisor"]
+    pad_w = (-width) % padding["pad_width_divisor"]
+    if not pad_h and not pad_w:
+        return frame
+    return cv2.copyMakeBorder(frame, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+
+
 def build_dlc_live(cropping: list[int] | None):
     try:
         from dlclive import DLCLive
@@ -681,7 +711,19 @@ def build_dlc_live(cropping: list[int] | None):
             ) from exc
         raise
 
-    return DLCLive(
+    live_class = DLCLive
+    if bool(getattr(config, "MODEL_CONSTANT_ZERO_PADDING", False)):
+        class ConstantPaddingDLCLive(DLCLive):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.model_padding = constant_padding_config(self.read_config())
+
+            def process_frame(self, frame: np.ndarray) -> np.ndarray:
+                return pad_frame_for_model(super().process_frame(frame), self.model_padding)
+
+        live_class = ConstantPaddingDLCLive
+
+    return live_class(
         model_path=config.MODEL_PATH,
         model_type=config.MODEL_TYPE,
         precision=getattr(config, "PRECISION", "FP32"),

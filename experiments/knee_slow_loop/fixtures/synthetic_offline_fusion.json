@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "data_kind": "Entirely synthetic numerical fixture; no images, animal recordings, annotations or model weights.",
+  "reference_implementation": {
+    "script_name": "run_experiment.py",
+    "function": "run_variant; expected result is fusion[3:-3, 1, :2]",
+    "source_sha256": "617119f35346e44952831946336fc80833365128c00f21c69bf9bf4060088385",
+    "settings_source_name": "experiment_settings.json",
+    "settings_source_sha256": "30f0aceeda686cd780d72c40f20baaf4e66eb4a76802d1fdd8eea4fe28bb39c8",
+    "method_revision": 2,
+    "settings_used": {
+      "geometry_observation_weight": 0.25,
+      "dlc_weight_clip": [
+        0.2,
+        1.0
+      ],
+      "geometric_shift_cap_fraction_of_F_plus_T": 0.15,
+      "temporal_lambda": 1.0,
+      "temporal_radius_frames": 3,
+      "max_internal_knee_gap_frames": 3,
+      "geometry_insertion_on_missing_knee": false,
+      "temporal_coordinates": "knee minus hip; hip/ankle/toes never modified"
+    },
+    "execution": "Imported original offline functions and called run_variant on synthetic arrays only; main(), geometry(), load_data() and reference-label evaluation were not called."
+  },
+  "input_generator": {
+    "module": "streaming_knee.py",
+    "function": "synthetic_sample",
+    "source_sha256": "8d049f28854d27577bd341bbbd131c9c8794bf54ca5a55a3edf13718db07ed4e",
+    "frames": 80,
+    "sampling_interval_s": 0.01,
+    "hip_xy": "[200 + 10*sin(t), 90 + 2*cos(2*t)]",
+    "clean_knee_xy": "hip + [28 + 6*sin(12*t), 37 + 10*cos(12*t)]",
+    "knee_noise_xy": "[1.3*sin(91*t), 1.7*cos(77*t)]",
+    "ankle_xy": "hip + [57, 80]",
+    "geometry_xy": "clean_knee_xy",
+    "radii_px": [
+      45,
+      50
+    ],
+    "knee_likelihood": "0.7 + 0.2*cos(t)",
+    "context": "All frames observed; one right-side route and one stimulation version."
+  },
+  "fixture_sha256": "6bb5e97ee2ccd683d4d6628225138a2f957b271665110a857aa2cc3e98ad40ce",
+  "array_contract": {
+    "points": "[80,4,3]: hip/knee/ankle/toes, each x/y/likelihood; toes duplicate ankle as unused synthetic placeholder",
+    "geometry": "[80,2]: precomputed synthetic geometry hypothesis",
+    "radii": "[80,2]: positive synthetic segment lengths",
+    "capture_times_s": "[80]: monotonic 100 Hz source timestamps",
+    "frame_ids": "[80]: 0..79",
+    "expected_interior_knee_xy": "[74,2]: independent offline reference for frames3..76"
+  },
+  "runtime_during_generation": {
+    "python": "3.10.11",
+    "numpy": "1.26.4"
+  },
+  "limitations": [
+    "Checks fully observed continuous interior only, not arbitrary gaps or edges.",
+    "No anatomical or biological ground truth; synthetic geometry is a numerical input.",
+    "Expected values are frozen offline outputs, not recomputed using StreamingKnee during tests."
+  ]
+}

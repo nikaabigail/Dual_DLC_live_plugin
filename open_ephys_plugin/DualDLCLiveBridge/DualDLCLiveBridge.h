@@ -57,7 +57,8 @@ public:
         проверяет решение сторожа, не доходя до эмиссии. */
     void applyPacketWatchdog();
 
-private:
+    // Read-only observation of the native filter output. Knees are extra
+    // landmarks, never members of the legacy angle/side-selection triplets.
     struct PosePoint
     {
         bool valid = false;
@@ -65,6 +66,32 @@ private:
         double y = 0.0;
         double likelihood = 0.0;
     };
+
+    struct NativeSideSnapshot
+    {
+        int64 frameId = -1;
+        bool hasTriplet = false;
+        bool hasAngle = false;
+        double angleDeg = 0.0;
+        String pickedSide;
+        std::unordered_map<std::string, PosePoint> points;
+    };
+
+    struct NativePoseSnapshot
+    {
+        int64 pairIndex = -1;
+        uint8 ttlWord = 0;
+        NativeSideSnapshot left;
+        NativeSideSnapshot right;
+    };
+
+    NativePoseSnapshot getNativePoseSnapshot();
+    // Offline replay only: refuses a processor with a live socket/thread.
+    // Uses the production binary parser and filters; never queues/emits TTL.
+    bool replayBinaryPosePacketOffline (const char* data, int numBytes, NativePoseSnapshot& snapshot);
+    bool replayJsonPosePacketOffline (const String& message, NativePoseSnapshot& snapshot);
+
+private:
 
     struct PointFilterState
     {
@@ -74,6 +101,7 @@ private:
         int64 lastGoodFrameId = 0;
         std::deque<double> xHist;
         std::deque<double> yHist;
+        std::deque<int64> frameHist;
     };
 
     struct TripletConfig
@@ -172,6 +200,7 @@ private:
     FilterStateMap rightFilterStates;
     SideValidityState leftValidity;
     SideValidityState rightValidity;
+    NativePoseSnapshot nativePoseSnapshot;
     std::atomic<int64> packetsReceived { 0 };
     std::atomic<int64> lastPairIndex { -1 };
     std::atomic<int64> lastPacketTimeMs { 0 };

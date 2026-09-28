@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from pose_layout import KNEE_BRIDGE_POINT_NAMES, LEGACY_BRIDGE_POINT_NAMES
 
 
 WORK_DIR = Path(r"C:\dlc\DLC_OBS_Spinal_cord_stimulation")
@@ -35,6 +37,9 @@ COMMON_BRIDGE_SETTINGS: dict[str, Any] = {
     "DUAL_OE_BRIDGE_PACKET_MODE": "pose",
     "DUAL_OE_BRIDGE_WIRE_FORMAT": "binary",
     "DUAL_OE_BRIDGE_REQUEST_ACK": False,
+    "DUAL_OE_BRIDGE_INCLUDE_KNEES": False,
+    "DUAL_USE_POINTS": list(LEGACY_BRIDGE_POINT_NAMES),
+    "MODEL_CONSTANT_ZERO_PADDING": False,
     "DUAL_FAST_POSE_ONLY": True,
     "DUAL_ENABLE_STAGE_PROFILER": True,
     "DUAL_PROFILE_EMA_ALPHA": 0.10,
@@ -79,10 +84,41 @@ PROFILE_ORDER = (
     "dual-best",
     "dual-cpu",
     "dual-fp16",
+    "single-knees-strict",
 )
 
 
 PROFILES: dict[str, LiveProfile] = {
+    "single-knees-strict": LiveProfile(
+        name="single-knees-strict",
+        target="single",
+        label="1 camera, 17 landmarks with knees, strict FP32",
+        summary="Opt-in knee model with native ROI and side selection; extended DDLP/v1 receiver required.",
+        settings={
+            **COMMON_SINGLE_SETTINGS,
+            "PRECISION": "FP32",
+            "GALAXY_OUTPUT_COLOR": "rgb",
+            "CONVERT_TO_RGB": False,
+            "DUAL_TORCH_ALLOW_TF32": False,
+            "DUAL_TORCH_CUDNN_BENCHMARK": True,
+            "DUAL_TORCH_COMPILE_BACKEND": "",
+            "DUAL_CV2_NUM_THREADS": 1,
+            "DUAL_TORCH_NUM_THREADS": 0,
+            "DUAL_TORCH_INTEROP_THREADS": 0,
+            "DUAL_OE_BRIDGE_INCLUDE_KNEES": True,
+            "DUAL_USE_POINTS": list(KNEE_BRIDGE_POINT_NAMES),
+            "MODEL_CONSTANT_ZERO_PADDING": True,
+            "SINGLE_AUTO_PICK_SIDE": True,
+            "SINGLE_EMIT_BOTH_LEGS": False,
+            "LEG_ROI_ENABLED": True,
+            "LEG_ROI_WIDTH": 448,
+        },
+        notes=(
+            "Set DLC_LIVE_KNEE_MODEL_PATH to the exported 17-point .pt file before launch.",
+            "Original hip-ankle-toes angles and side scoring stay unchanged; knees are appended.",
+            "DDLP/v1 count=8 requires the knee-capable receiver. Legacy profiles still send six points.",
+        ),
+    ),
     "single-best": LiveProfile(
         name="single-best",
         target="single",
@@ -304,8 +340,23 @@ def get_profile(name: str) -> LiveProfile:
 
 def apply_profile(config_module: Any, name: str) -> LiveProfile:
     profile = get_profile(name)
+    knee_model = None
+    if bool(profile.settings.get("DUAL_OE_BRIDGE_INCLUDE_KNEES", False)):
+        raw_path = os.getenv("DLC_LIVE_KNEE_MODEL_PATH", "").strip()
+        if not raw_path:
+            raise ValueError("Set DLC_LIVE_KNEE_MODEL_PATH before selecting single-knees-strict.")
+        knee_model = Path(raw_path).expanduser()
+        if not knee_model.is_file():
+            raise FileNotFoundError(f"Knee model does not exist: {knee_model}")
+        if not hasattr(config_module, "_model_path_before_knee_profile"):
+            config_module._model_path_before_knee_profile = config_module.MODEL_PATH
+    elif hasattr(config_module, "_model_path_before_knee_profile"):
+        config_module.MODEL_PATH = config_module._model_path_before_knee_profile
+        delattr(config_module, "_model_path_before_knee_profile")
     for key, value in profile.settings.items():
-        setattr(config_module, key, value)
+        setattr(config_module, key, list(value) if isinstance(value, list) else value)
+    if knee_model is not None:
+        config_module.MODEL_PATH = str(knee_model.resolve())
     return profile
 
 
