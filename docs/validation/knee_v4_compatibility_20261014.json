@@ -1,0 +1,60 @@
+{
+  "bundle_version": "0.2.0-rc3",
+  "native_plugin_version": "0.2.0-rc2",
+  "new_model_asset": "DLC_r_tm_side_knees_full_v4_snapshot-best-400_dlclive.pt",
+  "model_bytes": 97882287,
+  "new_model_sha256": "f703f47095c5776cb979b2a4ab3fdd1ec79c727a74fe468954ee768a3027ec6d",
+  "previous_model_sha256": "af11935cc40c1e19e39c04ce779e5858ad677d68412343a220fbcd9b31b6c226",
+  "bodyparts": [
+    "nose",
+    "eye_l",
+    "eye_r",
+    "fl_toes_l",
+    "fl_toes_r",
+    "hl_toes_l",
+    "hl_ankle_l",
+    "hl_hip_l",
+    "hl_iliac_l",
+    "hl_toes_r",
+    "hl_ankle_r",
+    "hl_hip_r",
+    "hl_iliac_r",
+    "spine",
+    "tail",
+    "hl_knee_l",
+    "hl_knee_r"
+  ],
+  "architecture": "ResNet50-GN / HeatmapHead 17 / locref 34",
+  "state_dict_keys": 163,
+  "checks": {
+    "bodypart_names_and_order_identical": true,
+    "architecture_identical": true,
+    "inference_preprocessing_identical": true,
+    "colormode_identical": true,
+    "state_dict_keys_identical": true,
+    "state_dict_shapes_identical": true,
+    "new_export_project_paths_empty": true
+  },
+  "inference_preprocessing": {
+    "normalize_images": true,
+    "hflip": false,
+    "auto_padding": {
+      "pad_height_divisor": 32,
+      "pad_width_divisor": 32,
+      "position": "top_left",
+      "border_mode": "constant",
+      "border_value": 0
+    }
+  },
+  "live_profile_preserved": {
+    "profile": "single-knees-strict",
+    "roi_width": 448,
+    "precision": "FP32",
+    "galaxy_output_color": "rgb",
+    "convert_to_rgb": false,
+    "constant_zero_padding": true,
+    "compile_backend": "",
+    "tf32": false
+  },
+  "quality_note": "Export/schema compatibility does not establish predictive quality or preserve old-model outputs. Held-out full-frame metrics must not be presented as ROI accuracy."
+}

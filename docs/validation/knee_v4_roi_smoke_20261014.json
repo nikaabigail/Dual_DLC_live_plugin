@@ -1,0 +1,94 @@
+{
+  "status": "passed",
+  "scope": "300-frame offline compatibility smoke, original live ROI helpers and native replay; not live hardware or accuracy validation",
+  "bundle_version": "0.2.0-rc3",
+  "native_plugin_version": "0.2.0-rc2",
+  "model_asset": "DLC_r_tm_side_knees_full_v4_snapshot-best-400_dlclive.pt",
+  "model_sha256": "f703f47095c5776cb979b2a4ab3fdd1ec79c727a74fe468954ee768a3027ec6d",
+  "profile": "single-knees-strict",
+  "source_frame_shape": [
+    220,
+    1920,
+    3
+  ],
+  "inference_roi_shape": [
+    220,
+    448,
+    3
+  ],
+  "effective_padded_shape": [
+    224,
+    448,
+    3
+  ],
+  "frames": 300,
+  "fps": 100.0,
+  "all_17_landmarks_finite": true,
+  "prediction_shape": [
+    300,
+    17,
+    3
+  ],
+  "roi_width_constant_448": true,
+  "rgb_and_constant_zero_padding": true,
+  "runtime": {
+    "dlclive": "1.1.0",
+    "torch": "2.10.0+cu128",
+    "gpu": "NVIDIA GeForce RTX 5070 Laptop GPU",
+    "precision": "FP32",
+    "convert_to_rgb": false,
+    "tf32": false,
+    "compile_backend": "",
+    "constant_zero_padding": true
+  },
+  "packets": {
+    "count": 300,
+    "bytes_per_packet": 300,
+    "format": "DDLP/v1, 8 named points"
+  },
+  "native_replay": {
+    "test": "DualDLCLiveOfflineReplay.ReplayFile",
+    "passed": true,
+    "rows": 300,
+    "indices_aligned": true,
+    "offline_socket_and_ttl_queue_assertions_passed": true,
+    "selected_side_counts": {
+      "left": 298,
+      "right": 2
+    },
+    "selected_knee_native_valid_frames": 202,
+    "test_binary_sha256": "9747acffc199425906339dbf959fa29a60d06c8a2a7a88ce2da0aeabe1b088e8"
+  },
+  "runtime_source_content_match_rc2": true,
+  "runtime_source_hashes": {
+    "python/single_rt_dlc_live_bridge.py": "c0966331eb3e59f909880d44003ef0d9d64294504da3ab480d61709d154c7ef2",
+    "python/dual_rt_dlc_live.py": "e8a904d0bf440f0c1cd48ed2298f0f0fb91c0601f6b3e7a3694c4c51db63fd6f",
+    "python/rt_dlc_live.py": "7ccfc9a38770fff6e0f6bfaa52045b284d416373c8eefac36ee1d25611957cd2",
+    "python/live_profiles.py": "c4a1c5e88ec532827384800406570b2372a4cbcca1e354c51842cd34174f2619",
+    "python/config_dual_rt_dlc_live.py": "f777eb5b24ee9c92a30e8fa5e0ad9e056d1399ab0aa56091ec0bbd27de8d8a4e",
+    "python/config_rt_dlc_live.py": "2cf331111ea6d6ed68998ba3e79bf8d6cbda2738810e03c46db0043e1c2c4464",
+    "python/pose_layout.py": "4f634a7f7b2852df250dd8f8d69a3d9477d2829d22dcd223a431e42f485b2008",
+    "scripts/preview_knees_roi.py": "36cd464237e860c5c0ab496f68a0632306705f50887176d9a1580efe20adf683"
+  },
+  "checkout_line_ending_only_hash_differences": [
+    "python/pose_layout.py",
+    "scripts/preview_knees_roi.py"
+  ],
+  "artifacts": {
+    "raw_roi_poses.npz": "40a832c8efeab5872ab43d753ab5439d27f68ff2ba402561011c6697b3246f3a",
+    "native_packets.ddlp": "3e2bdda1a33dc981b1a8195ee1341ef36bd74627db55eb5e3bfb451348fb99fc",
+    "native_filtered.jsonl": "0c01fdbbc6bee382e9b6bb3b0d1dd07fce95512323ed676e29768daea112690e",
+    "native_replay_test.xml": "792bd0cdf4d102851e56f3a5dd0692377a27aaf0f6bc7e6e50ffa909c60142d6"
+  },
+  "no_camera_access": true,
+  "no_live_udp": true,
+  "no_stimulation_output": true,
+  "quality_claimed": false,
+  "latency_benchmark_claimed": false,
+  "limitations": [
+    "Only the first 300 frames of one existing recording were exercised.",
+    "This validates load/preprocessing/ROI/packet/native-replay compatibility, not ROI accuracy across animals.",
+    "Full-frame held-out metrics are separate from this ROI smoke.",
+    "Fast-loop source/configuration/default model selection were not changed."
+  ]
+}

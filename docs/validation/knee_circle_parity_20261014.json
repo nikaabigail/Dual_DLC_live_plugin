@@ -1,0 +1,103 @@
+{
+  "pass": true,
+  "frames": 10974,
+  "approved_applied_frames": 8665,
+  "published_core_applied_frames": 8665,
+  "approved_status_counts": {
+    "fused_current_frame": 8665,
+    "raw_low_knee_confidence": 1587,
+    "raw_low_anchor_confidence": 287,
+    "raw_missing_current_heading": 435
+  },
+  "published_core_status_counts": {
+    "fused_current_frame": 8665,
+    "raw_low_knee_confidence": 1587,
+    "raw_low_anchor_confidence": 287,
+    "raw_missing_current_heading": 435
+  },
+  "field_comparison": {
+    "frame_index": {
+      "pass": true,
+      "nan_masks_equal": true,
+      "max_abs_difference": 0.0,
+      "atol": 1e-09
+    },
+    "raw_xy": {
+      "pass": true,
+      "nan_masks_equal": true,
+      "max_abs_difference": 0.0,
+      "atol": 1e-09
+    },
+    "fused_xy": {
+      "pass": true,
+      "nan_masks_equal": true,
+      "max_abs_difference": 0.0,
+      "atol": 1e-09
+    },
+    "geometry_xy": {
+      "pass": true,
+      "nan_masks_equal": true,
+      "max_abs_difference": 0.0,
+      "atol": 1e-09
+    },
+    "hip_xy": {
+      "pass": true,
+      "nan_masks_equal": true,
+      "max_abs_difference": 0.0,
+      "atol": 1e-09
+    },
+    "ankle_xy": {
+      "pass": true,
+      "nan_masks_equal": true,
+      "max_abs_difference": 0.0,
+      "atol": 1e-09
+    },
+    "radii": {
+      "pass": true,
+      "nan_masks_equal": true,
+      "max_abs_difference": 0.0,
+      "atol": 1e-09
+    },
+    "side": {
+      "pass": true
+    },
+    "status": {
+      "pass": true
+    },
+    "applied": {
+      "pass": true
+    },
+    "likelihood": {
+      "pass": true,
+      "nan_masks_equal": true,
+      "max_abs_difference": 0.0,
+      "atol": 1e-09
+    },
+    "correction_px": {
+      "pass": true,
+      "nan_masks_equal": true,
+      "max_abs_difference": 8.881784197001252e-16,
+      "atol": 1e-09
+    }
+  },
+  "hypothesis_circle_distance_max_error_px": {
+    "hip_xy": 2.0605739337042905e-13,
+    "ankle_xy": 2.3447910280083306e-13
+  },
+  "correction_cap_pass": true,
+  "no_low_confidence_corrections": true,
+  "all_refusals_preserve_raw_exactly": true,
+  "calibration_mode": "historical_loo supplied externally to core per frame, effective radii after existing anatomy prior",
+  "unique_side_length_branch_calibrations": 14,
+  "calibration_checks": {
+    "loo_current_original_row_excluded": 50
+  },
+  "private_annotations_copied_to_worktree": false,
+  "native_used_for_side_only": true,
+  "approved_sha256": "ae89208a51c1349235a70cfe6eea44dc93ce1e6c5140aba42ea066d431ae969a",
+  "published_core_sha256": "22b860d81d46762150ea718d58a4134175591809bbe8354befd1c85be05fa14e",
+  "raw_poses_sha256": "21b8684b1bad8e3298be6167f1e8e5d1524af2daa7b8720e7fbcc354763bd016",
+  "frozen_old_adapter_sha256": "17effadb4534bbbe6a41a040c30627bd0318733d765e4899e770af45eac907a7",
+  "elapsed_seconds": 2.2023600999998507,
+  "claim": "Algorithm reproduction to 1e-9 px tolerance only; not new anatomical accuracy evidence."
+}

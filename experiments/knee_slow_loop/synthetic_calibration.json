@@ -1,0 +1,21 @@
+{
+  "format_version": 1,
+  "calibration_id": "synthetic_example_not_an_animal_measurement",
+  "description": "Template only: invented projected pixel lengths. Copy outside the repository, replace the source hash with SHA256 of your exact RAW pose NPZ, and provide appropriate independently obtained calibration. No experimental annotations or animal dimensions are included.",
+  "source_hash_kind": "raw_poses_npz_sha256",
+  "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "coordinate_context": "full_frame_pixels_top_left",
+  "width": 320,
+  "height": 160,
+  "sides": {
+    "left": {"femur_px": 50.0, "tibia_px": 60.0, "canonical_branch_sign": 1},
+    "right": {"femur_px": 50.0, "tibia_px": 60.0, "canonical_branch_sign": -1}
+  },
+  "fusion_config": {
+    "pcutoff": 0.6,
+    "fusion_geometry_weight": 0.25,
+    "geometry_shift_cap_fraction": 0.15,
+    "maximum_disagreement_fraction": 0.5,
+    "heading_minimum_dx_px": 10.0
+  }
+}
